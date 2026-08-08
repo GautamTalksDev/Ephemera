@@ -9,8 +9,10 @@
   "scripts": {
     "dev": "concurrently -n api,worker,web -c blue,magenta,green \"pnpm --filter @ephemera/api dev\" \"pnpm --filter @ephemera/worker dev\" \"pnpm --filter @ephemera/web dev\"",
     "build": "pnpm -r run build",
-    "typecheck": "pnpm -r run typecheck"
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm --filter @ephemera/core test"
   },
+
   "devDependencies": {
     "concurrently": "^9.2.1",
     "typescript": "^5.9.2"

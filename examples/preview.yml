@@ -1,0 +1,33 @@
+version: 1
+services:
+  - name: api
+    type: runtime
+    runtime: nodejs@22
+    build:
+      commands:
+        - npm ci
+        - npm run build
+    start: node dist/server.js
+    port: 3000
+    public: false
+    env:
+      NODE_ENV: production
+      DATABASE_URL: ${db.DATABASE_URL}
+      WEB_ORIGIN: ${web.URL}
+
+  - name: db
+    type: database
+    engine: postgresql@16
+
+  - name: web
+    type: static
+    build:
+      commands:
+        - npm ci
+        - npm run build
+    port: 8080
+    public: true
+    env:
+      API_URL: ${api.URL}
+
+ttlMinutes: 60
