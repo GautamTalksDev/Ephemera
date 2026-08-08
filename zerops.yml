@@ -23,6 +23,8 @@ zerops:
         - corepack prepare pnpm@11.8.0 --activate
       buildCommands:
         - pnpm install --frozen-lockfile
+        # Emit apps/api/dist so init/start use plain node (no workspace-local tsx).
+        - pnpm --filter @ephemera/api build
       deployFiles:
         - ./package.json
         - ./pnpm-workspace.yaml
@@ -48,11 +50,10 @@ zerops:
         # Optional: set CORS_ORIGIN to the web subdomain if calling api directly.
         CORS_ORIGIN: "*"
         MAX_CONCURRENT_ENVS: "3"
-        PREVIEW_TTL_MINUTES: "60"
-      # Run migrations before the process starts.
-      initCommands:
-        - pnpm --filter @ephemera/api db:migrate
-      start: pnpm --filter @ephemera/api start
+        PREVIEW_TTL_MINUTES: "720"
+      # Migrate at start (not initCommands) so DATABASE_URL from run.envVariables
+      # is available. Idempotent + advisory-locked for multi-container boots.
+      start: bash -c "node apps/api/dist/db/migrate.js && node --import tsx apps/api/src/index.ts"
       healthCheck:
         httpGet:
           port: 3000
@@ -90,9 +91,9 @@ zerops:
         REDIS_URL: ${queue_connectionString}
         PROVIDER: zerops
         EPHEMERA_POST_COMMENTS: "1"
-        EPHEMERA_USE_EXAMPLE_PREVIEW: "1"
-        MAX_CONCURRENT_ENVS: "1"
-        PREVIEW_TTL_MINUTES: "60"
+        EPHEMERA_USE_EXAMPLE_PREVIEW: "0"
+        MAX_CONCURRENT_ENVS: "2"
+        PREVIEW_TTL_MINUTES: "720"
         RECONCILE_SCAN_MS: "10000"
         REAPER_EVERY_MS: "60000"
       start: pnpm --filter @ephemera/worker start

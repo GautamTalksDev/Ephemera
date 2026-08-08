@@ -55,6 +55,15 @@ export const environments = pgTable(
     providerRef: text("provider_ref"),
     desiredState: desiredStateEnum("desired_state").notNull().default("running"),
     actualState: actualStateEnum("actual_state").notNull().default("pending"),
+    /**
+     * When actualState last changed. Poll deadlines (provision/deploy) are
+     * measured from this instant so retries don't inherit an earlier clock.
+     */
+    actualStateEnteredAt: timestamp("actual_state_entered_at", {
+      withTimezone: true,
+    })
+      .notNull()
+      .defaultNow(),
     publicUrl: text("public_url"),
     errorMessage: text("error_message"),
     specJson: jsonb("spec_json").notNull().$type<Record<string, unknown>>(),

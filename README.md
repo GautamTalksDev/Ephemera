@@ -126,6 +126,18 @@ Content type: `application/json`. Secret: same as `GITHUB_WEBHOOK_SECRET`. Event
 3. Worker posts a comment with a working preview URL (`EPHEMERA_POST_COMMENTS=1`).
 4. Close the PR → environment is destroyed.
 
+## Security & scope (v0.1)
+
+- The dashboard is unauthenticated. Deliberate for this release — Ephemera is
+  meant to run inside a trusted network or behind your own auth proxy. Auth is
+  the first item on the roadmap.
+- GitHub tokens are stored per-repo in the control-plane database and are never
+  returned by the API.
+- Webhook payloads are verified with HMAC-SHA256 over the raw request body.
+- Preview environments are isolated per PR and destroyed on close or TTL expiry.
+
+Naming the gap yourself is worth more than hoping nobody looks.
+
 ## AI tools used
 
 | Tool | Role |

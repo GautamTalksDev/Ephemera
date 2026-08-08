@@ -1,20 +1,44 @@
 import { spawn } from "node:child_process";
 
-/** Never let a hung CLI block a reconciler tick. */
-export const ZCLI_TIMEOUT_MS = 90_000;
+/** Default for login / misc zcli calls. */
+export const ZCLI_TIMEOUT_MS = 120_000;
+export const ZCLI_IMPORT_TIMEOUT_MS = 300_000;
+/** Build + artefact upload + "Deploying service" often exceeds 2 minutes. */
+export const ZCLI_PUSH_TIMEOUT_MS = 420_000;
+export const ZCLI_DELETE_TIMEOUT_MS = 120_000;
 
 export type ZcliResult = {
   stdout: string;
   stderr: string;
 };
 
+export function timeoutForZcliArgs(args: readonly string[]): number {
+  if (args[0] === "project" && args[1] === "service-import") {
+    return ZCLI_IMPORT_TIMEOUT_MS;
+  }
+  if (args[0] === "service" && args[1] === "push") {
+    return ZCLI_PUSH_TIMEOUT_MS;
+  }
+  if (args[0] === "service" && args[1] === "delete") {
+    return ZCLI_DELETE_TIMEOUT_MS;
+  }
+  return ZCLI_TIMEOUT_MS;
+}
+
 /**
  * Run `zcli` with a hard timeout; capture stdout+stderr into any error.
+ * service-import: 300s; push: 420s; delete/other: 120s.
  */
 export async function runZcli(
   args: readonly string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+  } = {},
 ): Promise<ZcliResult> {
+  const timeoutMs = options.timeoutMs ?? timeoutForZcliArgs(args);
+
   return new Promise((resolve, reject) => {
     const child = spawn("zcli", args, {
       cwd: options.cwd,
@@ -43,10 +67,10 @@ export async function runZcli(
       child.kill("SIGKILL");
       finish(
         new Error(
-          `zcli ${args.join(" ")} timed out after ${ZCLI_TIMEOUT_MS}ms\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+          `zcli ${args.join(" ")} timed out after ${timeoutMs}ms\nstdout:\n${stdout}\nstderr:\n${stderr}`,
         ),
       );
-    }, ZCLI_TIMEOUT_MS);
+    }, timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       stdout += String(chunk);

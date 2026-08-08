@@ -22,7 +22,7 @@ function sleep(ms: number): Promise<void> {
 
 async function pollUntilReady(provider: Provider, providerRef: string) {
   for (;;) {
-    const status = await provider.getStatus({ providerRef });
+    const status = await provider.getStatus({ providerRef, phase: "deployed" });
     console.log(`  status: ${status.state}${status.publicUrl ? ` ${status.publicUrl}` : ""}${status.message ? ` (${status.message})` : ""}`);
     if (status.state === "ready") {
       return status;

@@ -4,6 +4,7 @@ export type {
   DeployCodeInput,
   DestroyEnvironmentInput,
   GetStatusInput,
+  GetStatusPhase,
   GetStatusResult,
   Provider,
   ProviderStatusState,
@@ -18,9 +19,20 @@ export {
 } from "./mock.js";
 export {
   ZeropsProvider,
+  assertEnvRefsValid,
   buildImportServices,
+  checkoutGitRef,
+  evaluateZeropsStatus,
+  isDatabaseStack,
+  mapZeropsServiceStatus,
+  mapZeropsSharedEnvVar,
+  probePublicUrl,
   providerRefForPr,
+  redactGitSecrets,
   serviceHostname,
+  translateEnvRefsToZerops,
+  translateServiceEnv,
+  withGitHubInstallationToken,
 } from "./zerops.js";
 export {
   DEFAULT_PROVIDER,

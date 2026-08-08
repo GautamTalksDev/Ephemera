@@ -10,9 +10,16 @@ import {
 import {
   PreviewSpecSchema,
   parsePreviewSpec,
+  redactGitSecrets,
   type PreviewSpec,
 } from "@ephemera/core";
-import { MAX_PROVIDER_ATTEMPTS, type ReconcileDeps } from "./deps.js";
+import {
+  DEPLOY_DEADLINE_MS,
+  MAX_PROVIDER_ATTEMPTS,
+  PROVISION_DEADLINE_MS,
+  PROVISION_EMPTY_GRACE_MS,
+  type ReconcileDeps,
+} from "./deps.js";
 import { renderStatusComment } from "./status-comment.js";
 
 export type ReconcileOnceResult = {
@@ -98,6 +105,36 @@ async function recordErrorAttempt(
   });
   // Keep lastReconciledAt fresh via claim; comment on persistent errors optionally skipped.
   return { failed: false, env: updated ?? env };
+}
+
+/** Elapsed ms since the env entered its current actualState. */
+function msInCurrentActualState(env: Environment): number {
+  return Date.now() - env.actualStateEnteredAt.getTime();
+}
+
+async function markPollFailed(
+  deps: ReconcileDeps,
+  env: Environment,
+  step: string,
+  message: string,
+): Promise<Environment> {
+  await appendEvent(deps.db, {
+    environmentId: env.id,
+    level: "error",
+    step,
+    message,
+  });
+  const updated = await updateEnvironmentState(deps.db, env.id, {
+    actualState: "failed",
+    errorMessage: message,
+    reconciledSha: env.headSha,
+  });
+  await refreshAndComment(deps, env.id);
+  return updated ?? env;
+}
+
+function isNoServicesMessage(message: string | undefined): boolean {
+  return Boolean(message && /no services found for providerRef/i.test(message));
 }
 
 async function succeedStep(
@@ -321,24 +358,15 @@ async function provisioningPoll(
     };
   }
 
+  const deadlineMs = deps.provisionDeadlineMs ?? PROVISION_DEADLINE_MS;
+  const graceMs = deps.provisionEmptyGraceMs ?? PROVISION_EMPTY_GRACE_MS;
+  const elapsed = msInCurrentActualState(env);
+
   try {
     const status = await deps.provider.getStatus({
       providerRef: env.providerRef,
+      phase: "provisioned",
     });
-
-    if (status.state === "failed") {
-      const { env: next } = await recordErrorAttempt(
-        deps,
-        env,
-        "provision-poll",
-        status.message ?? "provider reported failed",
-      );
-      return {
-        changed: true,
-        to: `${next.desiredState}/${next.actualState}`,
-        step: "provision-failed",
-      };
-    }
 
     if (status.state === "ready") {
       const updated = await succeedStep(
@@ -348,13 +376,74 @@ async function provisioningPoll(
           actualState: "deploying",
           errorMessage: null,
         },
-        "provision-poll",
+        "deploy-start",
         "provider ready; moving to deploying",
       );
       return {
         changed: true,
         to: `${updated.desiredState}/${updated.actualState}`,
         step: "provisioning→deploying",
+      };
+    }
+
+    const noServices = isNoServicesMessage(status.message);
+    // Empty list right after import: wait through grace, don't burn the budget.
+    if (noServices && elapsed < graceMs) {
+      return {
+        changed: false,
+        to: `${env.desiredState}/${env.actualState}`,
+        step: "provisioning-wait-empty",
+      };
+    }
+
+    // Still provisioning (or past-grace empty / soft failure): time-based only.
+    if (status.state === "provisioning" || noServices) {
+      if (elapsed >= deadlineMs) {
+        const next = await markPollFailed(
+          deps,
+          env,
+          "provision-poll",
+          status.message ??
+            `provisioning timed out after ${Math.round(deadlineMs / 1000)}s`,
+        );
+        return {
+          changed: true,
+          to: `${next.desiredState}/${next.actualState}`,
+          step: "provision-timeout",
+        };
+      }
+      return {
+        changed: false,
+        to: `${env.desiredState}/${env.actualState}`,
+        step: "provisioning-wait",
+      };
+    }
+
+    // Provider reported failed — retry until deadline, then fail.
+    if (status.state === "failed") {
+      if (elapsed >= deadlineMs) {
+        const next = await markPollFailed(
+          deps,
+          env,
+          "provision-poll",
+          status.message ?? "provider reported failed",
+        );
+        return {
+          changed: true,
+          to: `${next.desiredState}/${next.actualState}`,
+          step: "provision-failed",
+        };
+      }
+      await appendEvent(deps.db, {
+        environmentId: env.id,
+        level: "error",
+        step: "provision-poll",
+        message: `${status.message ?? "provider reported failed"} (waiting until provision deadline)`,
+      });
+      return {
+        changed: false,
+        to: `${env.desiredState}/${env.actualState}`,
+        step: "provisioning-retry",
       };
     }
 
@@ -365,16 +454,24 @@ async function provisioningPoll(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const { env: next } = await recordErrorAttempt(
-      deps,
-      env,
-      "provision-poll",
-      message,
-    );
+    if (elapsed >= deadlineMs) {
+      const next = await markPollFailed(deps, env, "provision-poll", message);
+      return {
+        changed: true,
+        to: `${next.desiredState}/${next.actualState}`,
+        step: "provision-poll-error",
+      };
+    }
+    await appendEvent(deps.db, {
+      environmentId: env.id,
+      level: "error",
+      step: "provision-poll",
+      message: `${message} (waiting until provision deadline)`,
+    });
     return {
-      changed: true,
-      to: `${next.desiredState}/${next.actualState}`,
-      step: "provision-poll-error",
+      changed: false,
+      to: `${env.desiredState}/${env.actualState}`,
+      step: "provision-poll-error-wait",
     };
   }
 }
@@ -431,31 +528,22 @@ async function deployingStep(
     deps.githubRepoUrl?.(repo.fullName) ??
     `https://github.com/${repo.fullName}.git`;
 
+  const deadlineMs = deps.deployDeadlineMs ?? DEPLOY_DEADLINE_MS;
+  const elapsed = msInCurrentActualState(env);
+
   try {
     await deps.provider.deployCode({
       providerRef: env.providerRef,
       repoUrl,
       ref: env.headSha,
       spec,
+      installationToken: repo.installationToken,
     });
 
     const status = await deps.provider.getStatus({
       providerRef: env.providerRef,
+      phase: "deployed",
     });
-
-    if (status.state === "failed") {
-      const { env: next } = await recordErrorAttempt(
-        deps,
-        env,
-        "deploy",
-        status.message ?? "provider reported failed after deploy",
-      );
-      return {
-        changed: true,
-        to: `${next.desiredState}/${next.actualState}`,
-        step: "deploy-failed",
-      };
-    }
 
     if (status.state === "ready") {
       const updated = await succeedStep(
@@ -477,23 +565,75 @@ async function deployingStep(
       };
     }
 
+    if (status.state === "provisioning") {
+      if (elapsed >= deadlineMs) {
+        const next = await markPollFailed(
+          deps,
+          env,
+          "deploy",
+          status.message ??
+            `deploy timed out after ${Math.round(deadlineMs / 1000)}s`,
+        );
+        return {
+          changed: true,
+          to: `${next.desiredState}/${next.actualState}`,
+          step: "deploy-timeout",
+        };
+      }
+      return {
+        changed: false,
+        to: `${env.desiredState}/${env.actualState}`,
+        step: "deploying-wait",
+      };
+    }
+
+    // failed — retry until deadline
+    if (elapsed >= deadlineMs) {
+      const next = await markPollFailed(
+        deps,
+        env,
+        "deploy",
+        status.message ?? "provider reported failed after deploy",
+      );
+      return {
+        changed: true,
+        to: `${next.desiredState}/${next.actualState}`,
+        step: "deploy-failed",
+      };
+    }
+    await appendEvent(deps.db, {
+      environmentId: env.id,
+      level: "error",
+      step: "deploy",
+      message: `${status.message ?? "provider reported failed after deploy"} (waiting until deploy deadline)`,
+    });
     return {
       changed: false,
       to: `${env.desiredState}/${env.actualState}`,
-      step: "deploying-wait",
+      step: "deploying-retry",
     };
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const { env: next } = await recordErrorAttempt(
-      deps,
-      env,
-      "deploy",
-      message,
-    );
+    const raw = err instanceof Error ? err.message : String(err);
+    // Never persist installation tokens that may appear in git remote URLs.
+    const message = redactGitSecrets(raw, [repo.installationToken]);
+    if (elapsed >= deadlineMs) {
+      const next = await markPollFailed(deps, env, "deploy", message);
+      return {
+        changed: true,
+        to: `${next.desiredState}/${next.actualState}`,
+        step: "deploy-error",
+      };
+    }
+    await appendEvent(deps.db, {
+      environmentId: env.id,
+      level: "error",
+      step: "deploy",
+      message: `${message} (waiting until deploy deadline)`,
+    });
     return {
-      changed: true,
-      to: `${next.desiredState}/${next.actualState}`,
-      step: "deploy-error",
+      changed: false,
+      to: `${env.desiredState}/${env.actualState}`,
+      step: "deploy-error-wait",
     };
   }
 }

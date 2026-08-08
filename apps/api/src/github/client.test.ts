@@ -1,5 +1,27 @@
 import { describe, expect, it, vi } from "vitest";
-import { EPHEMERA_COMMENT_MARKER, upsertPrComment } from "./client.js";
+import {
+  EPHEMERA_COMMENT_MARKER,
+  fetchBranchHeadSha,
+  upsertPrComment,
+} from "./client.js";
+
+describe("fetchBranchHeadSha", () => {
+  it("returns the commit sha for a branch", async () => {
+    const sha = "a".repeat(40);
+    const fetchImpl = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ sha }), { status: 200 }),
+    );
+    await expect(
+      fetchBranchHeadSha("GautamTalksDev/ephemera-demo-app", "main", {
+        token: "t",
+        fetchImpl,
+      }),
+    ).resolves.toBe(sha);
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(
+      "/repos/GautamTalksDev/ephemera-demo-app/commits/main",
+    );
+  });
+});
 
 describe("upsertPrComment", () => {
   it("creates a comment when none with the marker exists", async () => {

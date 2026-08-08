@@ -100,6 +100,12 @@ export async function upsertEnvironmentForPr(
         ...(input.errorMessage !== undefined
           ? { errorMessage: input.errorMessage }
           : {}),
+        ...(input.providerRef !== undefined
+          ? { providerRef: input.providerRef }
+          : {}),
+        ...(input.publicUrl !== undefined
+          ? { publicUrl: input.publicUrl }
+          : {}),
         updatedAt: new Date(),
       },
     })
@@ -125,7 +131,15 @@ export async function ensureRepo(
     .where(eq(repos.fullName, input.fullName))
     .limit(1);
   if (existing) {
-    return existing;
+    const [updated] = await db
+      .update(repos)
+      .set({
+        installationToken: input.installationToken,
+        defaultTtlMinutes: input.defaultTtlMinutes,
+      })
+      .where(eq(repos.id, existing.id))
+      .returning();
+    return updated ?? existing;
   }
 
   const [created] = await db

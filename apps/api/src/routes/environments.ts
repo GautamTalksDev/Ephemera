@@ -1,17 +1,38 @@
 import { Hono } from "hono";
-import { desc, eq, max } from "drizzle-orm";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { desc, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import {
-  createEnvironment,
+  countActiveEnvironments,
   ensureRepo,
   getEnvironmentById,
+  getEnvironmentByRepoAndPr,
   listEventsForEnvironment,
   updateEnvironmentState,
+  upsertEnvironmentForPr,
 } from "../db/index.js";
+import { fetchBranchHeadSha } from "../github/client.js";
 import { environments, repos } from "../db/schema.js";
 import { enqueueReconcile } from "../queue/reconcile.js";
+import { getMaxConcurrentEnvsFromEnv } from "../webhooks/github.js";
+
+/** Fixed high PR number so the live demo never collides with a real PR env. */
+const LIVE_DEMO_PR_NUMBER = 9001;
+const LIVE_DEMO_REPO = "GautamTalksDev/ephemera-demo-app";
+const LIVE_DEMO_BRANCH = "main";
+
+const PLACEHOLDER_SPEC: Record<string, unknown> = {
+  version: 1,
+  deferred: true,
+  services: [],
+};
+
+const ACTIVE_SLOT_STATES = new Set([
+  "pending",
+  "provisioning",
+  "deploying",
+  "ready",
+  "destroying",
+]);
 
 export type EnvironmentListItem = {
   id: string;
@@ -105,6 +126,7 @@ export function environmentRoutes(db: Db): Hono {
         providerRef: environments.providerRef,
         desiredState: environments.desiredState,
         actualState: environments.actualState,
+        actualStateEnteredAt: environments.actualStateEnteredAt,
         publicUrl: environments.publicUrl,
         errorMessage: environments.errorMessage,
         specJson: environments.specJson,
@@ -137,6 +159,7 @@ export function environmentRoutes(db: Db): Hono {
         providerRef: environments.providerRef,
         desiredState: environments.desiredState,
         actualState: environments.actualState,
+        actualStateEnteredAt: environments.actualStateEnteredAt,
         publicUrl: environments.publicUrl,
         errorMessage: environments.errorMessage,
         specJson: environments.specJson,
@@ -182,40 +205,90 @@ export function environmentRoutes(db: Db): Hono {
   });
 
   /**
-   * Provisions a real (mock-provider) environment from the built-in demo repo.
-   * Judges press this — it must enqueue work, not fake a UI-only demo.
+   * Provisions a real preview of GautamTalksDev/ephemera-demo-app@main.
+   * Resolves HEAD at click time; uses PR #9001 so it never collides with a real PR.
    */
   app.post("/demo/run", async (c) => {
-    // Touch the built-in demo preview so deploy/path stays honest in logs.
-    void readFileSync(
-      resolve(import.meta.dirname, "../../../../examples/preview.yml"),
-      "utf8",
-    );
+    const token = process.env.GITHUB_TOKEN?.trim();
+    if (!token) {
+      return c.json(
+        {
+          ok: false,
+          error:
+            "GITHUB_TOKEN is not configured — cannot resolve the demo repo HEAD SHA",
+        },
+        503,
+      );
+    }
 
+    let headSha: string;
+    try {
+      headSha = await fetchBranchHeadSha(LIVE_DEMO_REPO, LIVE_DEMO_BRANCH, {
+        token,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json(
+        {
+          ok: false,
+          error: `Could not resolve ${LIVE_DEMO_REPO}@${LIVE_DEMO_BRANCH}: ${message}`,
+        },
+        502,
+      );
+    }
+
+    const ttlMinutes =
+      Number(process.env.PREVIEW_TTL_MINUTES ?? 60) || 60;
     const repo = await ensureRepo(db, {
-      fullName: "ephemera-demo/live-demo",
-      installationToken: process.env.GITHUB_TOKEN ?? "demo-token",
-      defaultTtlMinutes: Number(process.env.PREVIEW_TTL_MINUTES ?? 60) || 60,
+      fullName: LIVE_DEMO_REPO,
+      installationToken: token,
+      defaultTtlMinutes: ttlMinutes,
     });
 
-    // Pick a fresh PR number for each demo click.
-    const [agg] = await db
-      .select({ value: max(environments.prNumber) })
-      .from(environments)
-      .where(eq(environments.repoId, repo.id));
-    const prNumber = (agg?.value ?? 1000) + 1;
+    const existing = await getEnvironmentByRepoAndPr(
+      db,
+      repo.id,
+      LIVE_DEMO_PR_NUMBER,
+    );
+    const existingOccupiesSlot = Boolean(
+      existing &&
+        existing.desiredState === "running" &&
+        ACTIVE_SLOT_STATES.has(existing.actualState),
+    );
 
-    const env = await createEnvironment(db, {
+    const max = getMaxConcurrentEnvsFromEnv();
+    const active = await countActiveEnvironments(db, existing?.id);
+    if (!existingOccupiesSlot && active >= max) {
+      return c.json(
+        {
+          ok: false,
+          error: `Maximum concurrent environments reached (${active}/${max}). Destroy an existing environment before running the live demo.`,
+        },
+        409,
+      );
+    }
+
+    const env = await upsertEnvironmentForPr(db, {
       repoId: repo.id,
-      prNumber,
-      headSha: "d".repeat(40),
-      branch: "demo/live",
+      prNumber: LIVE_DEMO_PR_NUMBER,
+      headSha,
+      branch: LIVE_DEMO_BRANCH,
+      ttlMinutes: repo.defaultTtlMinutes,
+      specJson: PLACEHOLDER_SPEC,
       desiredState: "running",
       actualState: "pending",
-      specJson: { version: 1, deferred: true, services: [] },
-      expiresAt: new Date(
-        Date.now() + repo.defaultTtlMinutes * 60_000,
-      ),
+      errorMessage: null,
+      providerRef: null,
+      publicUrl: null,
+    });
+
+    await updateEnvironmentState(db, env.id, {
+      attemptCount: 0,
+      reconciledSha: null,
+      errorMessage: null,
+      providerRef: null,
+      publicUrl: null,
+      actualState: "pending",
     });
 
     await enqueueReconcile(env.id);
@@ -223,7 +296,8 @@ export function environmentRoutes(db: Db): Hono {
       ok: true,
       environmentId: env.id,
       repoFullName: repo.fullName,
-      prNumber,
+      prNumber: LIVE_DEMO_PR_NUMBER,
+      headSha,
     });
   });
 

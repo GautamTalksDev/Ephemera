@@ -14,7 +14,8 @@ export function Layout() {
       const res = await runLiveDemo();
       navigate(`/environments/${res.environmentId}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "demo failed");
+      const message = err instanceof Error ? err.message : "demo failed";
+      setError(message);
     } finally {
       setBusy(false);
     }
@@ -47,7 +48,7 @@ export function Layout() {
       </header>
       {error && (
         <p className="mono" style={{ color: "var(--danger)", marginTop: 0 }}>
-          demo error: {error}
+          {error}
         </p>
       )}
       <Outlet />

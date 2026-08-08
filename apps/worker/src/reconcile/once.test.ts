@@ -11,6 +11,8 @@ import {
   attachMockProviderRedis,
   resetMockProviderState,
   resetProviderCache,
+  type GetStatusResult,
+  type Provider,
 } from "@ephemera/core";
 import { sql } from "drizzle-orm";
 import { Redis } from "ioredis";
@@ -21,7 +23,15 @@ import { reconcileOnce } from "./once.js";
 
 const redisUrl = process.env.REDIS_URL ?? "redis://127.0.0.1:6379";
 
-async function driveToTerminal(deps: ReconcileDeps, id: string, maxSteps = 40) {
+function isWaitStep(step: string): boolean {
+  return (
+    step.includes("wait") ||
+    step.endsWith("-retry") ||
+    step === "provisioning-wait-empty"
+  );
+}
+
+async function driveToTerminal(deps: ReconcileDeps, id: string, maxSteps = 80) {
   for (let i = 0; i < maxSteps; i++) {
     const result = await reconcileOnce(id, deps);
     const env = await getEnvironmentById(deps.db, id);
@@ -35,8 +45,8 @@ async function driveToTerminal(deps: ReconcileDeps, id: string, maxSteps = 40) {
     ) {
       return env;
     }
-    if (result.step === "provisioning-wait" || result.step === "deploying-wait") {
-      await new Promise((r) => setTimeout(r, 50));
+    if (isWaitStep(result.step)) {
+      await new Promise((r) => setTimeout(r, 40));
     }
   }
   const env = await getEnvironmentById(deps.db, id);
@@ -106,13 +116,100 @@ describe("reconcileOnce", () => {
     expect(deps.upsertPrComment).toHaveBeenCalled();
   });
 
-  it("provisioning failure retries then fails", async () => {
+  it("provisioning failure exceeds time deadline then fails", async () => {
     process.env.MOCK_FAILURE_RATE = "1";
+    deps.provisionDeadlineMs = 150;
+    deps.provisionEmptyGraceMs = 0;
     const { env } = await seedPending(2);
     const final = await driveToTerminal(deps, env.id);
     expect(final.actualState).toBe("failed");
-    expect(final.attemptCount).toBeGreaterThanOrEqual(3);
     expect(final.errorMessage).toMatch(/mock failure|failed/i);
+  });
+
+  it("empty providerRef list waits through grace then fails at deadline", async () => {
+    const emptyProvider: Provider = {
+      name: "empty-stub",
+      async createEnvironment() {
+        return { providerRef: "pr99" };
+      },
+      async deployCode() {},
+      async getStatus(): Promise<GetStatusResult> {
+        return {
+          state: "provisioning",
+          message: 'no services found for providerRef "pr99"',
+        };
+      },
+      async destroyEnvironment() {},
+    };
+    deps.provider = emptyProvider;
+    deps.provisionEmptyGraceMs = 120;
+    deps.provisionDeadlineMs = 280;
+
+    const { env } = await seedPending(99);
+    const afterProvision = await reconcileOnce(env.id, deps);
+    expect(afterProvision.step).toBe("pending→provisioning");
+
+    const entered = await getEnvironmentById(db, env.id);
+    expect(entered?.actualState).toBe("provisioning");
+    // Clock must be the provisioning transition, not env.createdAt / old events.
+    expect(entered!.actualStateEnteredAt.getTime()).toBeGreaterThanOrEqual(
+      entered!.createdAt.getTime(),
+    );
+
+    const duringGrace = await reconcileOnce(env.id, deps);
+    expect(duringGrace.step).toBe("provisioning-wait-empty");
+    expect(duringGrace.changed).toBe(false);
+
+    const final = await driveToTerminal(deps, env.id);
+    expect(final.actualState).toBe("failed");
+    expect(final.errorMessage).toMatch(/no services found/i);
+  });
+
+  it("provision deadline resets when re-entering provisioning after failed→pending", async () => {
+    const emptyProvider: Provider = {
+      name: "empty-stub",
+      async createEnvironment() {
+        return { providerRef: "pr77" };
+      },
+      async deployCode() {},
+      async getStatus(): Promise<GetStatusResult> {
+        return {
+          state: "provisioning",
+          message: 'no services found for providerRef "pr77"',
+        };
+      },
+      async destroyEnvironment() {},
+    };
+    deps.provider = emptyProvider;
+    deps.provisionEmptyGraceMs = 0;
+    deps.provisionDeadlineMs = 200;
+
+    const { env } = await seedPending(77);
+    const firstFail = await driveToTerminal(deps, env.id);
+    expect(firstFail.actualState).toBe("failed");
+
+    // New push while failed → reconciler resets to pending.
+    await db.execute(
+      sql`UPDATE environments SET head_sha = ${"b".repeat(40)} WHERE id = ${env.id}`,
+    );
+
+    const reset = await reconcileOnce(env.id, deps);
+    expect(reset.step).toBe("reset-failed");
+
+    const beforeRetry = Date.now();
+    const afterProvision = await reconcileOnce(env.id, deps);
+    expect(afterProvision.step).toBe("pending→provisioning");
+    const mid = await getEnvironmentById(db, env.id);
+    expect(mid?.actualStateEnteredAt.getTime()).toBeGreaterThanOrEqual(
+      beforeRetry - 50,
+    );
+
+    // Must not fail on the very next poll (old deadline must not apply).
+    const immediate = await reconcileOnce(env.id, deps);
+    expect(immediate.step).not.toBe("provision-timeout");
+    expect((await getEnvironmentById(db, env.id))?.actualState).toBe(
+      "provisioning",
+    );
   });
 
   it("destroy path: ready → destroyed", async () => {

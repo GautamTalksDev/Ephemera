@@ -2,7 +2,7 @@
  * Checkpoint 7 smoke: create → deploy → poll → destroy against a real Zerops project.
  * Usage: PROVIDER=zerops pnpm smoke
  *
- * Uses a tiny local git repo (no npm install) so push stays under the 90s zcli timeout.
+ * Uses a tiny local git repo (no npm install) so push stays well under the zcli timeout.
  * Run twice: the second create must skip already-existing hostnames (no duplicates).
  */
 import { mkdir, writeFile, rm } from "node:fs/promises";
@@ -90,7 +90,7 @@ async function makeTinyRepo(): Promise<{ repoUrl: string; cleanup: () => Promise
 async function pollUntilReady(provider: Provider, providerRef: string) {
   const started = now();
   for (;;) {
-    const status = await provider.getStatus({ providerRef });
+    const status = await provider.getStatus({ providerRef, phase: "deployed" });
     console.log(
       `  status: ${status.state}${status.publicUrl ? ` ${status.publicUrl}` : ""}${status.message ? ` (${status.message})` : ""}`,
     );

@@ -18,10 +18,20 @@ export type DeployCodeInput = {
   repoUrl: string;
   ref: string;
   spec: PreviewSpec;
+  /** GitHub App installation token — injected into https remotes for private repos. */
+  installationToken?: string;
 };
+
+/** Which readiness bar getStatus should apply. */
+export type GetStatusPhase = "provisioned" | "deployed";
 
 export type GetStatusInput = {
   providerRef: string;
+  /**
+   * provisioned — stacks exist; runtimes may still be READY_TO_DEPLOY (awaiting code).
+   * deployed — code has been pushed; every service must be ACTIVE (+ public URL).
+   */
+  phase: GetStatusPhase;
 };
 
 export type GetStatusResult = {

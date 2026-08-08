@@ -98,13 +98,26 @@ export async function updateEnvironmentState(
     attemptCount?: number;
     reconciledSha?: string | null;
     specJson?: Record<string, unknown>;
+    actualStateEnteredAt?: Date;
   },
 ): Promise<Environment | undefined> {
+  const now = new Date();
+  let actualStateEnteredAt = patch.actualStateEnteredAt;
+
+  // Reset the poll clock on every actualState transition (not on no-op patches).
+  if (patch.actualState !== undefined && actualStateEnteredAt === undefined) {
+    const current = await getEnvironmentById(db, id);
+    if (current && current.actualState !== patch.actualState) {
+      actualStateEnteredAt = now;
+    }
+  }
+
   const [row] = await db
     .update(environments)
     .set({
       ...patch,
-      updatedAt: new Date(),
+      ...(actualStateEnteredAt !== undefined ? { actualStateEnteredAt } : {}),
+      updatedAt: now,
     })
     .where(eq(environments.id, id))
     .returning();

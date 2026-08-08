@@ -198,6 +198,7 @@ export class MockProvider implements Provider {
   }
 
   async getStatus(input: GetStatusInput): Promise<GetStatusResult> {
+    void input.phase; // MockProvider ignores phase; timing model is phase-agnostic.
     await persistReady;
     const env = mockEnvs.get(input.providerRef);
     if (!env || env.destroyed) {

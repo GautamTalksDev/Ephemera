@@ -1,0 +1,1 @@
+ALTER TABLE "environments" ADD COLUMN "actual_state_entered_at" timestamp with time zone DEFAULT now() NOT NULL;
