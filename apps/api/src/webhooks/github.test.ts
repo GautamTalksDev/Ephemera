@@ -1,4 +1,7 @@
 import * as core from "@ephemera/core";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
@@ -7,24 +10,13 @@ import { environments, events, repos } from "../db/schema.js";
 import { signGitHubPayload } from "./verify.js";
 
 const secret = "vitest-webhook-secret";
+const fixtureDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../fixtures");
 
-function prPayload(overrides: Record<string, unknown> = {}) {
-  return {
-    action: "opened",
-    number: 42,
-    pull_request: {
-      number: 42,
-      head: {
-        sha: "abc123def456abc123def456abc123def456abcd",
-        ref: "feat/webhook",
-      },
-    },
-    repository: {
-      full_name: "ephemera-demo/webhook-test",
-    },
-    ...overrides,
-  };
-}
+/** Raw fixture bytes — signatures must be computed over this exact string. */
+const openedFixtureRaw = readFileSync(
+  resolve(fixtureDir, "github-pull-request-opened.json"),
+  "utf8",
+);
 
 describe("POST /webhooks/github", () => {
   const pool = createPool();
@@ -62,26 +54,24 @@ describe("POST /webhooks/github", () => {
     });
   }
 
-  async function postWebhook(
-    payload: unknown,
+  /** Post a pre-signed raw body string (never re-stringify after signing). */
+  async function postRaw(
+    raw: string,
     headers: Record<string, string> = {},
   ) {
-    const body = JSON.stringify(payload);
-    const signature = signGitHubPayload(body, secret);
     return app().request("/webhooks/github", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "x-github-event": "pull_request",
-        "x-hub-signature-256": signature,
+        "x-hub-signature-256": signGitHubPayload(raw, secret),
         ...headers,
       },
-      body,
+      body: raw,
     });
   }
 
   it("returns 401 on bad signature", async () => {
-    const body = JSON.stringify(prPayload());
     const res = await app().request("/webhooks/github", {
       method: "POST",
       headers: {
@@ -89,17 +79,17 @@ describe("POST /webhooks/github", () => {
         "x-github-event": "pull_request",
         "x-hub-signature-256": "sha256=" + "ab".repeat(32),
       },
-      body,
+      body: openedFixtureRaw,
     });
     expect(res.status).toBe(401);
     expect(enqueueReconcile).not.toHaveBeenCalled();
   });
 
-  it("upserts desiredState=running and enqueues without Provider calls", async () => {
+  it("verifies HMAC over raw fixture bytes (not a re-serialized object)", async () => {
     const providerSpy = vi.spyOn(core, "getProvider");
 
     const started = Date.now();
-    const res = await postWebhook(prPayload());
+    const res = await postRaw(openedFixtureRaw);
     const elapsed = Date.now() - started;
     const json = (await res.json()) as {
       ok: boolean;
@@ -122,22 +112,73 @@ describe("POST /webhooks/github", () => {
       .from(environments)
       .where(eq(environments.id, json.environmentId));
     expect(row?.desiredState).toBe("running");
-    expect(row?.headSha).toBe("abc123def456abc123def456abc123def456abcd");
-    expect(row?.prNumber).toBe(42);
+    expect(row?.headSha).toBe("1111222233334444555566667777888899990000");
+    expect(row?.prNumber).toBe(12);
 
     providerSpy.mockRestore();
   });
 
+  it("verifies payloads with unusual key order and whitespace", async () => {
+    // Deliberately ugly JSON — same logical payload as a PR open, but key order
+    // and spacing differ from JSON.stringify(prPayload()). Signing this raw
+    // string (not a re-serialized object) is what GitHub does.
+    const raw = `{
+  "repository" : { "full_name" : "ephemera-demo/whitespace" },
+  "action":"opened",
+  "pull_request":{
+      "head"  :  { "ref":"feat/spaces", "sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+      "number": 7
+  },
+  "number":7
+}
+`;
+    const res = await postRaw(raw);
+    const json = (await res.json()) as {
+      ok: boolean;
+      desiredState: string;
+      environmentId: string;
+    };
+
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(json.desiredState).toBe("running");
+
+    const [row] = await db
+      .select()
+      .from(environments)
+      .where(eq(environments.id, json.environmentId));
+    expect(row?.prNumber).toBe(7);
+    expect(row?.branch).toBe("feat/spaces");
+    expect(row?.headSha).toBe("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("rejects when signature was computed over a re-serialized body", async () => {
+    const parsed = JSON.parse(openedFixtureRaw) as unknown;
+    const reserialized = JSON.stringify(parsed);
+    // Sign the compact re-serialization, but POST the original fixture bytes.
+    const res = await app().request("/webhooks/github", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "pull_request",
+        "x-hub-signature-256": signGitHubPayload(reserialized, secret),
+      },
+      body: openedFixtureRaw,
+    });
+    expect(res.status).toBe(401);
+    expect(enqueueReconcile).not.toHaveBeenCalled();
+  });
+
   it("sets desiredState=destroyed on closed", async () => {
-    const open = await postWebhook(prPayload({ action: "opened" }));
+    const open = await postRaw(openedFixtureRaw);
     const opened = (await open.json()) as { environmentId: string };
     enqueueReconcile.mockClear();
 
-    const res = await postWebhook(
-      prPayload({
-        action: "closed",
-      }),
+    const closedRaw = openedFixtureRaw.replace(
+      '"action": "opened"',
+      '"action": "closed"',
     );
+    const res = await postRaw(closedRaw);
     const json = (await res.json()) as {
       desiredState: string;
       environmentId: string;
@@ -157,47 +198,40 @@ describe("POST /webhooks/github", () => {
   });
 
   it("ignores non-pull_request events with 200", async () => {
-    const body = JSON.stringify({ zen: "keep it logically awesome" });
-    const res = await app().request("/webhooks/github", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-github-event": "ping",
-        "x-hub-signature-256": signGitHubPayload(body, secret),
-      },
-      body,
-    });
+    const body = '{"zen":"keep it logically awesome"}';
+    const res = await postRaw(body, { "x-github-event": "ping" });
     expect(res.status).toBe(200);
     expect(enqueueReconcile).not.toHaveBeenCalled();
   });
 
   it("marks failed and does not enqueue when MAX_CONCURRENT_ENVS exceeded", async () => {
-    // Fill concurrency slots.
     for (let i = 1; i <= 3; i++) {
-      const res = await postWebhook(
-        prPayload({
-          action: "opened",
-          number: i,
-          pull_request: {
-            number: i,
-            head: { sha: `sha${i}`.padEnd(40, "0"), ref: `branch-${i}` },
-          },
-        }),
-      );
+      const raw = `{
+  "action": "opened",
+  "number": ${i},
+  "pull_request": {
+    "number": ${i},
+    "head": { "sha": "${`sha${i}`.padEnd(40, "0")}", "ref": "branch-${i}" }
+  },
+  "repository": { "full_name": "ephemera-demo/webhook-test" }
+}
+`;
+      const res = await postRaw(raw);
       expect(res.status).toBe(200);
     }
     enqueueReconcile.mockClear();
 
-    const res = await postWebhook(
-      prPayload({
-        action: "opened",
-        number: 99,
-        pull_request: {
-          number: 99,
-          head: { sha: "f".repeat(40), ref: "over-limit" },
-        },
-      }),
-    );
+    const over = `{
+  "action": "opened",
+  "number": 99,
+  "pull_request": {
+    "number": 99,
+    "head": { "sha": "${"f".repeat(40)}", "ref": "over-limit" }
+  },
+  "repository": { "full_name": "ephemera-demo/webhook-test" }
+}
+`;
+    const res = await postRaw(over);
     const json = (await res.json()) as {
       queued: boolean;
       actualState: string;

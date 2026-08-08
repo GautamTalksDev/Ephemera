@@ -32,7 +32,7 @@ export function createApp(options: CreateAppOptions = {}): Hono {
   const webhookDeps: GitHubWebhookDeps = {
     db,
     enqueueReconcile,
-    getWebhookSecret: () => process.env.GITHUB_WEBHOOK_SECRET ?? "",
+    getWebhookSecret: () => process.env.GITHUB_WEBHOOK_SECRET?.trim() ?? "",
     getMaxConcurrentEnvs: getMaxConcurrentEnvsFromEnv,
     getDefaultTtlMinutes: getDefaultTtlMinutesFromEnv,
     getInstallationToken: () => process.env.GITHUB_TOKEN ?? "dev-token",

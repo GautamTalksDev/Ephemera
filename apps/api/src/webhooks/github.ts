@@ -77,16 +77,20 @@ function logWebhookEvent(
  * CRITICAL: this handler does NO provisioning work. It verifies the signature,
  * writes/updates a row (desired state only), enqueues a reconcile job, and
  * returns 200. It must never call a Provider.
+ *
+ * Signature verification MUST use the raw request body bytes GitHub signed.
+ * Never HMAC a re-serialized object (JSON.parse → JSON.stringify round-trip
+ * changes key order/whitespace and yields a 401 for valid deliveries).
  */
 export async function handleGitHubWebhook(
   c: Context,
   deps: GitHubWebhookDeps,
 ): Promise<Response> {
-  const rawBody = await c.req.text();
+  const raw = await c.req.text();
   const signature = c.req.header("x-hub-signature-256");
   const secret = deps.getWebhookSecret();
 
-  if (!verifyGitHubSignature(rawBody, signature, secret)) {
+  if (!verifyGitHubSignature(raw, signature, secret)) {
     return c.json({ ok: false, error: "invalid signature" }, 401);
   }
 
@@ -97,7 +101,7 @@ export async function handleGitHubWebhook(
 
   let payload: PullRequestPayload;
   try {
-    payload = JSON.parse(rawBody) as PullRequestPayload;
+    payload = JSON.parse(raw) as PullRequestPayload;
   } catch {
     return c.json({ ok: false, error: "invalid json" }, 400);
   }
