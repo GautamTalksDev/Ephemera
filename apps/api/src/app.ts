@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import { VERSION, type HealthResponse } from "@ephemera/core";
 import { createDb, createPool, type Db } from "./db/client.js";
 import { enqueueReconcile } from "./queue/reconcile.js";
+import { environmentRoutes } from "./routes/environments.js";
+import { importRoutes } from "./routes/import.js";
 import {
   getDefaultTtlMinutesFromEnv,
   getMaxConcurrentEnvsFromEnv,
@@ -29,7 +31,6 @@ export function createApp(options: CreateAppOptions = {}): Hono {
   };
   webhookDeps.db = db;
 
-
   const app = new Hono();
 
   app.get("/health", (c) => {
@@ -38,6 +39,8 @@ export function createApp(options: CreateAppOptions = {}): Hono {
   });
 
   app.post(githubWebhookPath, (c) => handleGitHubWebhook(c, webhookDeps));
+  app.route("/", environmentRoutes(db));
+  app.route("/", importRoutes());
 
   return app;
 }

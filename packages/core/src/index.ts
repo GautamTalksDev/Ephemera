@@ -55,3 +55,5 @@ export {
   type ProviderName,
   type ProviderStatusState,
 } from "./provider/index.js";
+
+export { importCompose, type ComposeImportResult } from "./compose/index.js";
