@@ -31,18 +31,29 @@ export function getReconcileQueue(): Queue<ReconcileJobData> {
 }
 
 /**
- * Enqueue a reconcile job. jobId = environmentId so duplicate webhooks collapse.
+ * Enqueue a reconcile job.
+ * Default jobId = environmentId so webhook duplicates collapse.
+ * Pass continue:true from the worker after a forward step so a new job is
+ * scheduled even while the current job is still active.
  */
-export async function enqueueReconcile(environmentId: string): Promise<void> {
+export async function enqueueReconcile(
+  environmentId: string,
+  opts: { continue?: boolean } = {},
+): Promise<void> {
   const q = getReconcileQueue();
-  const existing = await q.getJob(environmentId);
-  if (existing) {
-    const state = await existing.getState();
-    if (state === "completed" || state === "failed") {
-      await existing.remove();
-    } else {
-      // waiting | delayed | active | prioritized — already queued; collapse.
-      return;
+  const jobId = opts.continue
+    ? `${environmentId}:cont:${Date.now()}`
+    : environmentId;
+
+  if (!opts.continue) {
+    const existing = await q.getJob(jobId);
+    if (existing) {
+      const state = await existing.getState();
+      if (state === "completed" || state === "failed") {
+        await existing.remove();
+      } else {
+        return;
+      }
     }
   }
 
@@ -50,7 +61,7 @@ export async function enqueueReconcile(environmentId: string): Promise<void> {
     "reconcile",
     { environmentId },
     {
-      jobId: environmentId,
+      jobId,
       removeOnComplete: 1000,
       removeOnFail: 1000,
     },

@@ -10,15 +10,16 @@
     "dev": "concurrently -n api,worker,web -c blue,magenta,green \"pnpm --filter @ephemera/api dev\" \"pnpm --filter @ephemera/worker dev\" \"pnpm --filter @ephemera/web dev\"",
     "build": "pnpm -r run build",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm -r --filter=@ephemera/core --filter=@ephemera/api test",
-
+    "test": "pnpm -r --filter=@ephemera/core --filter=@ephemera/api --filter=@ephemera/worker test",
     "drive:mock-provider": "tsx scripts/drive-mock-provider.ts",
     "db:generate": "pnpm --filter @ephemera/api db:generate",
     "db:migrate": "pnpm --filter @ephemera/api db:migrate",
     "db:seed": "pnpm --filter @ephemera/api db:seed",
     "db:claim-concurrent": "tsx scripts/claim-concurrent.ts",
-    "replay:github-webhook": "tsx scripts/replay-github-webhook.ts"
+    "replay:github-webhook": "tsx scripts/replay-github-webhook.ts",
+    "gate:reconciler": "tsx scripts/gate-reconciler.ts"
   },
+
   "dependencies": {
     "@ephemera/core": "workspace:*",
     "bullmq": "^5.58.5",

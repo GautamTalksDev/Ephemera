@@ -39,7 +39,10 @@ export {
 export {
   DEFAULT_PROVIDER,
   MockProvider,
+  attachMockProviderRedis,
+  destroyMockProviderRef,
   getProvider,
+  listMockProviderRefs,
   resetMockProviderState,
   resetProviderCache,
   type CreateEnvironmentInput,

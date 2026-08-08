@@ -60,6 +60,10 @@ export const environments = pgTable(
     specJson: jsonb("spec_json").notNull().$type<Record<string, unknown>>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     lastReconciledAt: timestamp("last_reconciled_at", { withTimezone: true }),
+    /** Provider-call failures toward the failed threshold (resets on successful step). */
+    attemptCount: integer("attempt_count").notNull().default(0),
+    /** headSha last acted on / failed on — used to detect new pushes while failed. */
+    reconciledSha: text("reconciled_sha"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -71,6 +75,7 @@ export const environments = pgTable(
   (table) => [
     uniqueIndex("environments_repo_pr_uidx").on(table.repoId, table.prNumber),
     index("environments_last_reconciled_at_idx").on(table.lastReconciledAt),
+    index("environments_provider_ref_idx").on(table.providerRef),
   ],
 );
 

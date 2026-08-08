@@ -1,4 +1,4 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "./client.js";
 import {
   claimableActualStates,
@@ -95,6 +95,9 @@ export async function updateEnvironmentState(
     publicUrl?: string | null;
     errorMessage?: string | null;
     lastReconciledAt?: Date | null;
+    attemptCount?: number;
+    reconciledSha?: string | null;
+    specJson?: Record<string, unknown>;
   },
 ): Promise<Environment | undefined> {
   const [row] = await db
@@ -106,6 +109,129 @@ export async function updateEnvironmentState(
     .where(eq(environments.id, id))
     .returning();
   return row;
+}
+
+/**
+ * Claim a specific environment row for reconciliation.
+ * Returns undefined if missing or locked by another worker (SKIP LOCKED).
+ */
+export async function claimEnvironmentById(
+  db: Db,
+  environmentId: string,
+): Promise<EnvironmentClaim | undefined> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(environments)
+      .where(eq(environments.id, environmentId))
+      .limit(1)
+      .for("update", { skipLocked: true });
+
+    if (!row) {
+      return undefined;
+    }
+
+    const holdMs = claimLockHoldMs();
+    if (holdMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, holdMs));
+    }
+
+    const [claimed] = await tx
+      .update(environments)
+      .set({
+        lastReconciledAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(environments.id, row.id))
+      .returning();
+
+    return claimed;
+  });
+}
+
+/** IDs that still need reconciliation work (stale scan / timer). */
+export async function listReconcileCandidateIds(
+  db: Db,
+  staleAfterMs = 10_000,
+): Promise<string[]> {
+  const staleBefore = new Date(Date.now() - staleAfterMs);
+  const result = await db.execute<{ id: string }>(sql`
+    SELECT ${environments.id} AS id
+    FROM ${environments}
+    WHERE
+      (
+        ${environments.actualState} IN ('pending', 'provisioning', 'deploying', 'destroying')
+        OR (
+          ${environments.desiredState} = 'destroyed'
+          AND ${environments.actualState} <> 'destroyed'
+        )
+        OR (
+          ${environments.desiredState} = 'running'
+          AND ${environments.actualState} = 'ready'
+          AND ${environments.expiresAt} <= NOW()
+        )
+        OR (
+          ${environments.actualState} = 'failed'
+          AND ${environments.desiredState} = 'running'
+          AND (
+            ${environments.reconciledSha} IS NULL
+            OR ${environments.reconciledSha} <> ${environments.headSha}
+          )
+        )
+      )
+      AND (
+        ${environments.lastReconciledAt} IS NULL
+        OR ${environments.lastReconciledAt} <= ${staleBefore}
+      )
+    ORDER BY ${environments.lastReconciledAt} ASC NULLS FIRST
+    LIMIT 100
+  `);
+  return result.rows.map((r) => r.id);
+}
+
+export async function listExpiredRunningEnvironmentIds(
+  db: Db,
+): Promise<string[]> {
+  const result = await db.execute<{ id: string }>(sql`
+    SELECT ${environments.id} AS id
+    FROM ${environments}
+    WHERE ${environments.desiredState} = 'running'
+      AND ${environments.expiresAt} <= NOW()
+      AND ${environments.actualState} <> 'destroyed'
+  `);
+  return result.rows.map((r) => r.id);
+}
+
+export async function listKnownProviderRefs(db: Db): Promise<string[]> {
+  const rows = await db
+    .select({ providerRef: environments.providerRef })
+    .from(environments)
+    .where(sql`${environments.providerRef} IS NOT NULL`);
+  return rows
+    .map((r) => r.providerRef)
+    .filter((ref): ref is string => typeof ref === "string" && ref.length > 0);
+}
+
+export async function getRepoById(
+  db: Db,
+  id: string,
+): Promise<Repo | undefined> {
+  const [row] = await db.select().from(repos).where(eq(repos.id, id)).limit(1);
+  return row;
+}
+
+export async function listRecentEvents(
+  db: Db,
+  environmentId: string,
+  limit = 3,
+): Promise<Event[]> {
+  const rows = await db
+    .select()
+    .from(events)
+    .where(eq(events.environmentId, environmentId))
+    .orderBy(desc(events.createdAt))
+    .limit(limit);
+  return rows.reverse();
 }
 
 export async function appendEvent(

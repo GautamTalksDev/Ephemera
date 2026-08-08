@@ -113,9 +113,24 @@ importers:
 
   apps/worker:
     dependencies:
+      '@ephemera/api':
+        specifier: workspace:*
+        version: link:../api
       '@ephemera/core':
         specifier: workspace:*
         version: link:../../packages/core
+      bullmq:
+        specifier: ^5.58.5
+        version: 5.81.3
+      drizzle-orm:
+        specifier: ^0.44.5
+        version: 0.44.7(@types/pg@8.20.4)(pg@8.22.0)
+      ioredis:
+        specifier: ^5.7.0
+        version: 5.11.1
+      pg:
+        specifier: ^8.16.3
+        version: 8.22.0
     devDependencies:
       '@types/node':
         specifier: ^22.17.2
@@ -126,6 +141,9 @@ importers:
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.7(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.23.11)(yaml@2.9.0)
 
   packages/core:
     dependencies:

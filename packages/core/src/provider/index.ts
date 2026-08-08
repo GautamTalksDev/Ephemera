@@ -9,7 +9,13 @@ export type {
   ProviderStatusState,
 } from "./types.js";
 
-export { MockProvider, resetMockProviderState } from "./mock.js";
+export {
+  MockProvider,
+  attachMockProviderRedis,
+  destroyMockProviderRef,
+  listMockProviderRefs,
+  resetMockProviderState,
+} from "./mock.js";
 export {
   DEFAULT_PROVIDER,
   getProvider,
