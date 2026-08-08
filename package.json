@@ -18,7 +18,8 @@
     "db:claim-concurrent": "tsx scripts/claim-concurrent.ts",
     "replay:github-webhook": "tsx scripts/replay-github-webhook.ts",
     "gate:reconciler": "tsx scripts/gate-reconciler.ts",
-    "gate:compose-import": "tsx scripts/gate-compose-import.ts"
+    "gate:compose-import": "tsx scripts/gate-compose-import.ts",
+    "smoke": "tsx --env-file=.env scripts/smoke-zerops.ts"
   },
 
   "dependencies": {

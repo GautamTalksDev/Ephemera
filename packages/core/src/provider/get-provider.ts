@@ -1,7 +1,8 @@
 import { MockProvider } from "./mock.js";
+import { ZeropsProvider } from "./zerops.js";
 import type { Provider } from "./types.js";
 
-export type ProviderName = "mock";
+export type ProviderName = "mock" | "zerops";
 
 export const DEFAULT_PROVIDER: ProviderName = "mock";
 
@@ -14,14 +15,14 @@ let cached: Provider | undefined;
 export function getProvider(): Provider {
   const name = (process.env.PROVIDER ?? DEFAULT_PROVIDER).trim() || DEFAULT_PROVIDER;
 
-  if (name !== "mock") {
+  if (name !== "mock" && name !== "zerops") {
     throw new Error(
-      `Unknown PROVIDER "${name}". Supported: mock`,
+      `Unknown PROVIDER "${name}". Supported: mock, zerops`,
     );
   }
 
   if (!cached || cached.name !== name) {
-    cached = new MockProvider();
+    cached = name === "zerops" ? new ZeropsProvider() : new MockProvider();
   }
   return cached;
 }

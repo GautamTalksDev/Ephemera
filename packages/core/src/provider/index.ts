@@ -17,6 +17,12 @@ export {
   resetMockProviderState,
 } from "./mock.js";
 export {
+  ZeropsProvider,
+  buildImportServices,
+  providerRefForPr,
+  serviceHostname,
+} from "./zerops.js";
+export {
   DEFAULT_PROVIDER,
   getProvider,
   resetProviderCache,

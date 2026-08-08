@@ -5,6 +5,8 @@ export type ProviderStatusState = "provisioning" | "ready" | "failed";
 export type CreateEnvironmentInput = {
   envId: string;
   spec: PreviewSpec;
+  /** Required by ZeropsProvider for deterministic `pr{N}…` hostnames. */
+  prNumber?: number;
 };
 
 export type CreateEnvironmentResult = {

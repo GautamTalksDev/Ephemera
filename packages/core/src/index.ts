@@ -9,7 +9,7 @@ export const HealthResponseSchema = z.object({
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
-export const ProviderNameSchema = z.enum(["mock"]);
+export const ProviderNameSchema = z.enum(["mock", "zerops"]);
 
 export {
   ALLOWED_ENGINES,
@@ -39,12 +39,16 @@ export {
 export {
   DEFAULT_PROVIDER,
   MockProvider,
+  ZeropsProvider,
   attachMockProviderRedis,
+  buildImportServices,
   destroyMockProviderRef,
   getProvider,
   listMockProviderRefs,
+  providerRefForPr,
   resetMockProviderState,
   resetProviderCache,
+  serviceHostname,
   type CreateEnvironmentInput,
   type CreateEnvironmentResult,
   type DeployCodeInput,

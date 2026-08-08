@@ -266,6 +266,7 @@ async function pendingToProvisioning(
     const created = await deps.provider.createEnvironment({
       envId: env.id,
       spec: parsed.spec,
+      prNumber: env.prNumber,
     });
 
     const updated = await succeedStep(
