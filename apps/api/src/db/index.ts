@@ -1,5 +1,11 @@
 export { createDb, createPool, getDatabaseUrl, type Db } from "./client.js";
 export {
+  countActiveEnvironments,
+  ensureRepo,
+  getEnvironmentByRepoAndPr,
+  upsertEnvironmentForPr,
+} from "./env-helpers.js";
+export {
   appendEvent,
   claimNextEnvironment,
   createEnvironment,

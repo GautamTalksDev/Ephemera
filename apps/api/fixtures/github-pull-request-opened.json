@@ -1,0 +1,17 @@
+{
+  "action": "opened",
+  "number": 12,
+  "pull_request": {
+    "number": 12,
+    "head": {
+      "sha": "1111222233334444555566667777888899990000",
+      "ref": "feat/checkpoint-4"
+    },
+    "base": {
+      "ref": "main"
+    }
+  },
+  "repository": {
+    "full_name": "ephemera-demo/hello"
+  }
+}

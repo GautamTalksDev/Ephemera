@@ -1,14 +1,12 @@
 import { serve } from "@hono/node-server";
-import { Hono } from "hono";
-import { VERSION, type HealthResponse } from "@ephemera/core";
+import { createApp } from "./app.js";
+import { getReconcileQueue, getRedisConnection } from "./queue/reconcile.js";
 
-const app = new Hono();
+// Eagerly open Redis so the first webhook doesn't pay connection setup.
+getRedisConnection();
+getReconcileQueue();
 
-app.get("/health", (c) => {
-  const body: HealthResponse = { ok: true, version: VERSION };
-  return c.json(body);
-});
-
+const app = createApp();
 const port = Number(process.env.PORT ?? 3000);
 
 serve({ fetch: app.fetch, port }, (info) => {
