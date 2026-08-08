@@ -11,10 +11,12 @@
     "build": "pnpm -r run build",
     "typecheck": "pnpm -r run typecheck",
     "test": "pnpm --filter @ephemera/core test",
-    "drive:mock-provider": "tsx scripts/drive-mock-provider.ts"
+    "drive:mock-provider": "tsx scripts/drive-mock-provider.ts",
+    "db:generate": "pnpm --filter @ephemera/api db:generate",
+    "db:migrate": "pnpm --filter @ephemera/api db:migrate",
+    "db:seed": "pnpm --filter @ephemera/api db:seed",
+    "db:claim-concurrent": "tsx scripts/claim-concurrent.ts"
   },
-
-
   "dependencies": {
     "@ephemera/core": "workspace:*"
   },
@@ -24,6 +26,3 @@
     "typescript": "^5.9.2"
   }
 }
-
-
-
