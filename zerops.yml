@@ -1,0 +1,120 @@
+# Deploy Ephemera (control plane) to its own Zerops project — NOT the preview-envs project.
+# Service hostnames must match zerops-project-import.yml: web, api, worker, db, queue.
+#
+# After import + first push, set these secrets in the Zerops GUI (or REST user-data).
+# NOTE: Zerops forbids custom env keys prefixed with ZEROPS_ on its own platform.
+#   api:    GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN
+#   worker: GITHUB_TOKEN,
+#           EPHEMERA_PREVIEW_TOKEN=<token>,
+#           EPHEMERA_PREVIEW_PROJECT_ID=<LIGHT ephemera-envs project id>
+#
+# Push:
+#   zcli push api -P $EPHEMERA_APP_PROJECT_ID
+#   zcli push worker -P $EPHEMERA_APP_PROJECT_ID
+#   zcli push web -P $EPHEMERA_APP_PROJECT_ID
+
+zerops:
+  # ── API (public) ──────────────────────────────────────────────
+  - setup: api
+    build:
+      base: nodejs@22
+      prepareCommands:
+        - corepack enable
+        - corepack prepare pnpm@11.8.0 --activate
+      buildCommands:
+        - pnpm install --frozen-lockfile
+      deployFiles:
+        - ./package.json
+        - ./pnpm-workspace.yaml
+        - ./pnpm-lock.yaml
+        - ./node_modules
+        - ./apps/api
+        - ./packages/core
+        - ./examples
+      cache:
+        - node_modules
+        - /root/.local/share/pnpm/store
+    run:
+      base: nodejs@22
+      ports:
+        - port: 3000
+          httpSupport: true
+      envVariables:
+        PORT: "3000"
+        NODE_ENV: production
+        # Zerops-generated private-network connection strings
+        DATABASE_URL: ${db_connectionString}
+        REDIS_URL: ${queue_connectionString}
+        # Optional: set CORS_ORIGIN to the web subdomain if calling api directly.
+        CORS_ORIGIN: "*"
+        MAX_CONCURRENT_ENVS: "3"
+        PREVIEW_TTL_MINUTES: "60"
+      # Run migrations before the process starts.
+      initCommands:
+        - pnpm --filter @ephemera/api db:migrate
+      start: pnpm --filter @ephemera/api start
+      healthCheck:
+        httpGet:
+          port: 3000
+          path: /health
+
+  # ── Worker (private — no public port) ─────────────────────────
+  - setup: worker
+    build:
+      base: nodejs@22
+      prepareCommands:
+        - corepack enable
+        - corepack prepare pnpm@11.8.0 --activate
+        # ZeropsProvider shells out to zcli for preview-env lifecycle.
+        - npm i -g @zerops/zcli
+      buildCommands:
+        - pnpm install --frozen-lockfile
+      deployFiles:
+        - ./package.json
+        - ./pnpm-workspace.yaml
+        - ./pnpm-lock.yaml
+        - ./node_modules
+        - ./apps/api
+        - ./apps/worker
+        - ./packages/core
+        - ./examples
+      cache:
+        - node_modules
+        - /root/.local/share/pnpm/store
+    run:
+      base: nodejs@22
+      # No ports — worker stays on the private network only.
+      envVariables:
+        NODE_ENV: production
+        DATABASE_URL: ${db_connectionString}
+        REDIS_URL: ${queue_connectionString}
+        PROVIDER: zerops
+        EPHEMERA_POST_COMMENTS: "1"
+        EPHEMERA_USE_EXAMPLE_PREVIEW: "1"
+        MAX_CONCURRENT_ENVS: "1"
+        PREVIEW_TTL_MINUTES: "60"
+        RECONCILE_SCAN_MS: "10000"
+        REAPER_EVERY_MS: "60000"
+      start: pnpm --filter @ephemera/worker start
+
+  # ── Web (public static) ───────────────────────────────────────
+  - setup: web
+    build:
+      base: nodejs@22
+      prepareCommands:
+        - corepack enable
+        - corepack prepare pnpm@11.8.0 --activate
+      envVariables:
+        # Resolved by Zerops at build time from the project subdomain host.
+        VITE_API_BASE: https://api-${zeropsSubdomainHost}-3000.prg1.zerops.app
+      buildCommands:
+        - pnpm install --frozen-lockfile
+        - pnpm --filter @ephemera/web build
+      # ~/ = deploy directory *contents* to runtime /var/www (not a nested folder).
+      deployFiles:
+        - apps/web/dist/~/
+      cache:
+        - node_modules
+        - /root/.local/share/pnpm/store
+    run:
+      base: static

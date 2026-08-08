@@ -45,12 +45,16 @@ type ZeropsProject = {
   zeropsSubdomainHost?: string | null;
 };
 
-function requireEnv(name: string): string {
-  const v = process.env[name]?.trim();
-  if (!v) {
-    throw new Error(`${name} is required when PROVIDER=zerops`);
+function requireEnv(...names: string[]): string {
+  for (const name of names) {
+    const v = process.env[name]?.trim();
+    if (v) {
+      return v;
+    }
   }
-  return v;
+  throw new Error(
+    `${names.join(" or ")} is required when PROVIDER=zerops`,
+  );
 }
 
 /** Deterministic hostname prefix for a PR — also used as providerRef. */
@@ -279,8 +283,15 @@ export class ZeropsProvider implements Provider {
   constructor(
     options: { token?: string; projectId?: string } = {},
   ) {
-    this.token = options.token ?? requireEnv("ZEROPS_API_TOKEN");
-    this.projectId = options.projectId ?? requireEnv("ZEROPS_PROJECT_ID");
+    // Zerops forbids custom env keys with a ZEROPS_ prefix on its own platform,
+    // so the control-plane worker uses EPHEMERA_PREVIEW_* there. Local/dev still
+    // uses ZEROPS_API_TOKEN / ZEROPS_PROJECT_ID.
+    this.token =
+      options.token ??
+      requireEnv("ZEROPS_API_TOKEN", "EPHEMERA_PREVIEW_TOKEN");
+    this.projectId =
+      options.projectId ??
+      requireEnv("ZEROPS_PROJECT_ID", "EPHEMERA_PREVIEW_PROJECT_ID");
   }
 
   private async ensureLogin(): Promise<void> {

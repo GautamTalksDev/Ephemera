@@ -25,6 +25,23 @@ export type EnvironmentEvent = {
   createdAt: string;
 };
 
+/**
+ * Dev: Vite proxies `/api/*` → api (stripping the prefix).
+ * Prod: set `VITE_API_BASE` to the public api origin (no trailing slash).
+ */
+const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(
+  /\/$/,
+  "",
+) ?? "";
+
+function apiUrl(path: string): string {
+  if (API_BASE) {
+    // Production: talk to api host directly (paths have no /api prefix).
+    return `${API_BASE}${path}`;
+  }
+  return `/api${path}`;
+}
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string };
@@ -35,7 +52,7 @@ async function json<T>(res: Response): Promise<T> {
 
 export async function fetchEnvironments(): Promise<EnvironmentItem[]> {
   const data = await json<{ environments: EnvironmentItem[] }>(
-    await fetch("/api/environments"),
+    await fetch(apiUrl("/environments")),
   );
   return data.environments;
 }
@@ -44,15 +61,17 @@ export async function fetchEnvironmentDetail(id: string): Promise<{
   environment: EnvironmentItem;
   events: EnvironmentEvent[];
 }> {
-  return json(await fetch(`/api/environments/${id}`));
+  return json(await fetch(apiUrl(`/environments/${id}`)));
 }
 
 export async function destroyEnvironment(id: string): Promise<void> {
-  await json(await fetch(`/api/environments/${id}/destroy`, { method: "POST" }));
+  await json(
+    await fetch(apiUrl(`/environments/${id}/destroy`), { method: "POST" }),
+  );
 }
 
 export async function runLiveDemo(): Promise<{ environmentId: string }> {
-  return json(await fetch("/api/demo/run", { method: "POST" }));
+  return json(await fetch(apiUrl("/demo/run"), { method: "POST" }));
 }
 
 export async function importComposeYaml(compose: string): Promise<{
@@ -60,7 +79,7 @@ export async function importComposeYaml(compose: string): Promise<{
   warnings: string[];
 }> {
   return json(
-    await fetch("/api/import/compose", {
+    await fetch(apiUrl("/import/compose"), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ compose }),

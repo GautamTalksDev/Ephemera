@@ -1,0 +1,63 @@
+# Import into a NEW Zerops project (separate from ephemera-envs / preview environments).
+#
+#   zcli project project-import zerops-project-import.yml --org-id $ZEROPS_ORG_ID
+#
+# Zerops currently ships Valkey as 7.2 (prompt said valkey@7). Use NON_HA / single
+# everywhere — this is the control plane, keep it cheap.
+#
+# Public: web + api. Private: worker, db, queue.
+
+project:
+  name: ephemera
+  tags:
+    - ephemera
+    - control-plane
+
+services:
+  - hostname: db
+    type: postgresql@16
+    mode: NON_HA
+    priority: 20
+
+  # Prompt: valkey@7 — platform type is valkey@7.2 (only supported version).
+  - hostname: queue
+    type: valkey@7.2
+    mode: NON_HA
+    priority: 20
+
+  - hostname: api
+    type: nodejs@22
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    verticalAutoscaling:
+      cpuMode: SHARED
+      minCpu: 1
+      maxCpu: 1
+      minRam: 0.25
+      maxRam: 1
+      minDisk: 1
+      maxDisk: 5
+    priority: 5
+
+  - hostname: worker
+    type: nodejs@22
+    minContainers: 1
+    maxContainers: 1
+    verticalAutoscaling:
+      cpuMode: SHARED
+      minCpu: 1
+      maxCpu: 1
+      minRam: 0.25
+      maxRam: 1
+      minDisk: 1
+      maxDisk: 5
+    priority: 5
+
+  - hostname: web
+    type: static
+    mode: NON_HA
+    enableSubdomainAccess: true
+    minContainers: 1
+    maxContainers: 1
+    priority: 1

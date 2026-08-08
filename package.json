@@ -19,7 +19,8 @@
     "replay:github-webhook": "tsx scripts/replay-github-webhook.ts",
     "gate:reconciler": "tsx scripts/gate-reconciler.ts",
     "gate:compose-import": "tsx scripts/gate-compose-import.ts",
-    "smoke": "tsx --env-file=.env scripts/smoke-zerops.ts"
+    "smoke": "tsx --env-file=.env scripts/smoke-zerops.ts",
+    "deploy:zerops": "bash scripts/deploy-zerops.sh"
   },
 
   "dependencies": {

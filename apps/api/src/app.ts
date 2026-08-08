@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { VERSION, type HealthResponse } from "@ephemera/core";
 import { createDb, createPool, type Db } from "./db/client.js";
 import { enqueueReconcile } from "./queue/reconcile.js";
@@ -17,6 +18,14 @@ export type CreateAppOptions = {
   webhookDeps?: Partial<GitHubWebhookDeps>;
 };
 
+function corsOrigin(): string | string[] | undefined {
+  const raw = process.env.CORS_ORIGIN?.trim();
+  if (!raw || raw === "*") {
+    return raw === "*" ? "*" : undefined;
+  }
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
 export function createApp(options: CreateAppOptions = {}): Hono {
   const db = options.webhookDeps?.db ?? options.db ?? createDb(createPool());
 
@@ -32,6 +41,18 @@ export function createApp(options: CreateAppOptions = {}): Hono {
   webhookDeps.db = db;
 
   const app = new Hono();
+
+  const origin = corsOrigin();
+  if (origin !== undefined) {
+    app.use(
+      "*",
+      cors({
+        origin,
+        allowMethods: ["GET", "POST", "OPTIONS"],
+        allowHeaders: ["Content-Type", "Authorization"],
+      }),
+    );
+  }
 
   app.get("/health", (c) => {
     const body: HealthResponse = { ok: true, version: VERSION };
