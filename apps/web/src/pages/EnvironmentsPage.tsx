@@ -109,7 +109,7 @@ export function EnvironmentsPage() {
               </td>
               <td className="mono">{env.branch}</td>
               <td>
-                <StateBadge state={env.actualState} />
+                <StateBadge state={env.actualState} degraded={env.degraded} />
                 {env.desiredState !== "running" && (
                   <div className="mono muted" style={{ fontSize: 11, marginTop: 4 }}>
                     desired {env.desiredState}
@@ -127,7 +127,11 @@ export function EnvironmentsPage() {
               </td>
               <td className="mono">{ttlLabel(env.expiresAt)}</td>
               <td style={{ maxWidth: 280 }}>
-                <span className={env.actualState === "failed" ? "err" : "muted"}>
+                <span
+                  className={
+                    env.actualState === "failed" || env.degraded ? "err" : "muted"
+                  }
+                >
                   {env.waitingOn}
                 </span>
               </td>

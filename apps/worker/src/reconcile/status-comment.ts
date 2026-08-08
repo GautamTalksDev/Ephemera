@@ -20,7 +20,7 @@ export function renderStatusComment(input: {
     "",
     `| | |`,
     `|---|---|`,
-    `| **State** | \`${env.actualState}\` (desired: \`${env.desiredState}\`) |`,
+    `| **State** | \`${env.actualState}\`${env.degraded ? " (degraded)" : ""} (desired: \`${env.desiredState}\`) |`,
     `| **PR** | #${env.prNumber} @ \`${env.headSha.slice(0, 7)}\` |`,
     `| **TTL** | ${ttlLabel} |`,
   ];
@@ -28,7 +28,9 @@ export function renderStatusComment(input: {
   if (env.publicUrl) {
     lines.push(`| **URL** | ${env.publicUrl} |`);
   }
-  if (env.errorMessage) {
+  if (env.degraded && env.errorMessage) {
+    lines.push(`| **Degraded** | ${env.errorMessage} |`);
+  } else if (env.errorMessage) {
     lines.push(`| **Error** | ${env.errorMessage} |`);
   }
 

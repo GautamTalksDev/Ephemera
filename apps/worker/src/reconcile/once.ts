@@ -10,6 +10,7 @@ import {
 import {
   PreviewSpecSchema,
   parsePreviewSpec,
+  probePublicUrl as defaultProbePublicUrl,
   redactGitSecrets,
   type PreviewSpec,
 } from "@ephemera/core";
@@ -18,6 +19,7 @@ import {
   MAX_PROVIDER_ATTEMPTS,
   PROVISION_DEADLINE_MS,
   PROVISION_EMPTY_GRACE_MS,
+  READY_HEALTH_FAIL_MS,
   type ReconcileDeps,
 } from "./deps.js";
 import { renderStatusComment } from "./status-comment.js";
@@ -128,6 +130,8 @@ async function markPollFailed(
     actualState: "failed",
     errorMessage: message,
     reconciledSha: env.headSha,
+    degraded: false,
+    healthFailedSince: null,
   });
   await refreshAndComment(deps, env.id);
   return updated ?? env;
@@ -214,6 +218,8 @@ async function takeOneStep(
         reconciledSha: null,
         publicUrl: null,
         providerRef: null,
+        degraded: false,
+        healthFailedSince: null,
       },
       "reset",
       `headSha changed (${env.reconciledSha ?? "none"} → ${env.headSha}); resetting to pending`,
@@ -553,6 +559,8 @@ async function deployingStep(
           actualState: "ready",
           publicUrl: status.publicUrl ?? null,
           errorMessage: null,
+          degraded: false,
+          healthFailedSince: null,
           reconciledSha: env.headSha,
         },
         "deploy",
@@ -657,10 +665,77 @@ async function readyStep(
     };
   }
 
+  if (!env.publicUrl) {
+    return {
+      changed: false,
+      to: `${env.desiredState}/${env.actualState}`,
+      step: "noop-ready",
+    };
+  }
+
+  const probe = deps.probePublicUrl ?? defaultProbePublicUrl;
+  const health = await probe(env.publicUrl);
+  const failBudgetMs = deps.readyHealthFailMs ?? READY_HEALTH_FAIL_MS;
+
+  if (health.ok) {
+    if (!env.degraded && !env.healthFailedSince && !env.errorMessage) {
+      return {
+        changed: false,
+        to: `${env.desiredState}/${env.actualState}`,
+        step: "noop-ready",
+      };
+    }
+    // Recover from transient failures without leaving ready.
+    const updated = await updateEnvironmentState(deps.db, env.id, {
+      degraded: false,
+      healthFailedSince: null,
+      errorMessage: null,
+    });
+    await appendEvent(deps.db, {
+      environmentId: env.id,
+      level: "info",
+      step: "health",
+      message: `public URL healthy again: ${env.publicUrl}`,
+    });
+    await refreshAndComment(deps, env.id);
+    return {
+      changed: true,
+      to: `${(updated ?? env).desiredState}/${(updated ?? env).actualState}`,
+      step: "ready-recovered",
+    };
+  }
+
+  const message =
+    health.message ?? `public URL health check failed: ${env.publicUrl}`;
+  const failedSince = env.healthFailedSince ?? new Date();
+  const elapsed = Date.now() - failedSince.getTime();
+
+  // Stay ready while degraded — containers restart routinely.
+  if (elapsed < failBudgetMs) {
+    const updated = await updateEnvironmentState(deps.db, env.id, {
+      degraded: true,
+      healthFailedSince: failedSince,
+      errorMessage: message,
+    });
+    await appendEvent(deps.db, {
+      environmentId: env.id,
+      level: "error",
+      step: "health",
+      message: `${message} (degraded; fail after ${Math.ceil((failBudgetMs - elapsed) / 1000)}s more)`,
+    });
+    await refreshAndComment(deps, env.id);
+    return {
+      changed: true,
+      to: `${(updated ?? env).desiredState}/${(updated ?? env).actualState}`,
+      step: "ready-degraded",
+    };
+  }
+
+  const next = await markPollFailed(deps, env, "health", message);
   return {
-    changed: false,
-    to: `${env.desiredState}/${env.actualState}`,
-    step: "noop-ready",
+    changed: true,
+    to: `${next.desiredState}/${next.actualState}`,
+    step: "ready→failed",
   };
 }
 

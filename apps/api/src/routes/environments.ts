@@ -44,6 +44,7 @@ export type EnvironmentListItem = {
   actualState: string;
   publicUrl: string | null;
   errorMessage: string | null;
+  degraded: boolean;
   providerRef: string | null;
   attemptCount: number;
   expiresAt: string;
@@ -57,6 +58,7 @@ function waitingOn(env: {
   actualState: string;
   desiredState: string;
   errorMessage: string | null;
+  degraded: boolean;
   expiresAt: Date;
 }): string {
   if (env.actualState === "failed") {
@@ -78,6 +80,11 @@ function waitingOn(env: {
     case "ready":
       if (env.expiresAt.getTime() <= Date.now()) {
         return "TTL expired — waiting for reaper/reconciler to destroy";
+      }
+      if (env.degraded) {
+        return env.errorMessage
+          ? `degraded — ${env.errorMessage}`
+          : "degraded — public URL health check failing";
       }
       return "live";
     case "destroying":
@@ -102,6 +109,7 @@ function serializeEnv(
     actualState: row.actualState,
     publicUrl: row.publicUrl,
     errorMessage: row.errorMessage,
+    degraded: row.degraded,
     providerRef: row.providerRef,
     attemptCount: row.attemptCount,
     expiresAt: row.expiresAt.toISOString(),
@@ -129,6 +137,8 @@ export function environmentRoutes(db: Db): Hono {
         actualStateEnteredAt: environments.actualStateEnteredAt,
         publicUrl: environments.publicUrl,
         errorMessage: environments.errorMessage,
+        degraded: environments.degraded,
+        healthFailedSince: environments.healthFailedSince,
         specJson: environments.specJson,
         expiresAt: environments.expiresAt,
         lastReconciledAt: environments.lastReconciledAt,
@@ -162,6 +172,8 @@ export function environmentRoutes(db: Db): Hono {
         actualStateEnteredAt: environments.actualStateEnteredAt,
         publicUrl: environments.publicUrl,
         errorMessage: environments.errorMessage,
+        degraded: environments.degraded,
+        healthFailedSince: environments.healthFailedSince,
         specJson: environments.specJson,
         expiresAt: environments.expiresAt,
         lastReconciledAt: environments.lastReconciledAt,

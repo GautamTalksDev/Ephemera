@@ -240,4 +240,56 @@ describe("reconcileOnce", () => {
     expect(final.actualState).not.toBe("deploying");
     expect(final.actualState).not.toBe("pending");
   });
+
+  it("ready + single HTTP 502 stays ready (degraded), recovers on pass", async () => {
+    const { env } = await seedPending(5);
+    deps.probePublicUrl = vi.fn(async () => ({ ok: true }));
+    await driveToTerminal(deps, env.id);
+
+    deps.probePublicUrl = vi.fn(async () => ({
+      ok: false,
+      message: "public URL returned 502",
+    }));
+    deps.readyHealthFailMs = 60_000;
+    const degraded = await reconcileOnce(env.id, deps);
+    expect(degraded.step).toBe("ready-degraded");
+    const mid = await getEnvironmentById(db, env.id);
+    expect(mid?.actualState).toBe("ready");
+    expect(mid?.degraded).toBe(true);
+    expect(mid?.errorMessage).toMatch(/502/);
+    expect(mid?.healthFailedSince).toBeTruthy();
+
+    deps.probePublicUrl = vi.fn(async () => ({ ok: true }));
+    const recovered = await reconcileOnce(env.id, deps);
+    expect(recovered.step).toBe("ready-recovered");
+    const clean = await getEnvironmentById(db, env.id);
+    expect(clean?.actualState).toBe("ready");
+    expect(clean?.degraded).toBe(false);
+    expect(clean?.errorMessage).toBeNull();
+    expect(clean?.healthFailedSince).toBeNull();
+  });
+
+  it("ready fails only after continuous health failures exceed budget", async () => {
+    const { env } = await seedPending(6);
+    deps.probePublicUrl = vi.fn(async () => ({ ok: true }));
+    await driveToTerminal(deps, env.id);
+
+    await updateEnvironmentState(db, env.id, {
+      degraded: true,
+      healthFailedSince: new Date(Date.now() - 10_000),
+      errorMessage: "public URL returned 502",
+    });
+    deps.probePublicUrl = vi.fn(async () => ({
+      ok: false,
+      message: "public URL returned 502",
+    }));
+    deps.readyHealthFailMs = 5_000;
+
+    const failed = await reconcileOnce(env.id, deps);
+    expect(failed.step).toBe("ready→failed");
+    const row = await getEnvironmentById(db, env.id);
+    expect(row?.actualState).toBe("failed");
+    expect(row?.degraded).toBe(false);
+    expect(row?.errorMessage).toMatch(/502/);
+  });
 });

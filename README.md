@@ -4,6 +4,13 @@ Ephemeral PR preview environments on [Zerops](https://zerops.io).
 
 Open a pull request → Ephemera provisions a throwaway stack, posts a working URL on the PR, and tears it down when the PR closes (or the TTL expires).
 
+## See it working
+
+- **Live dashboard:** https://web-2c23.prg1.zerops.app
+- **Demo repo:** https://github.com/GautamTalksDev/ephemera-demo-app — open a PR
+  there and Ephemera provisions a preview for it. Or press **Run live demo** on
+  the dashboard.
+
 ## Architecture
 
 ```

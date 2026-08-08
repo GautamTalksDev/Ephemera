@@ -8,6 +8,7 @@ export type EnvironmentItem = {
   actualState: string;
   publicUrl: string | null;
   errorMessage: string | null;
+  degraded: boolean;
   providerRef: string | null;
   attemptCount: number;
   expiresAt: string;

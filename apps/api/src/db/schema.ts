@@ -1,4 +1,5 @@
 import {
+  boolean,
   index,
   integer,
   jsonb,
@@ -66,6 +67,13 @@ export const environments = pgTable(
       .defaultNow(),
     publicUrl: text("public_url"),
     errorMessage: text("error_message"),
+    /**
+     * Ready but public URL health check is failing. Cleared on the next pass.
+     * Does not change actualState until failures persist (see healthFailedSince).
+     */
+    degraded: boolean("degraded").notNull().default(false),
+    /** When the current continuous health-check failure streak began. */
+    healthFailedSince: timestamp("health_failed_since", { withTimezone: true }),
     specJson: jsonb("spec_json").notNull().$type<Record<string, unknown>>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     lastReconciledAt: timestamp("last_reconciled_at", { withTimezone: true }),

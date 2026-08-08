@@ -94,6 +94,8 @@ export async function updateEnvironmentState(
     providerRef?: string | null;
     publicUrl?: string | null;
     errorMessage?: string | null;
+    degraded?: boolean;
+    healthFailedSince?: Date | null;
     lastReconciledAt?: Date | null;
     attemptCount?: number;
     reconciledSha?: string | null;
@@ -181,7 +183,6 @@ export async function listReconcileCandidateIds(
         OR (
           ${environments.desiredState} = 'running'
           AND ${environments.actualState} = 'ready'
-          AND ${environments.expiresAt} <= NOW()
         )
         OR (
           ${environments.actualState} = 'failed'

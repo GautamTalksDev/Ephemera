@@ -28,6 +28,15 @@ export type ReconcileDeps = {
    * before it can fail the step (default 180s).
    */
   provisionEmptyGraceMs?: number;
+  /**
+   * Continuous public-URL health failures while ready before marking failed
+   * (default 5 min). Transient 502s only set degraded.
+   */
+  readyHealthFailMs?: number;
+  /** Injectable for tests — defaults to core probePublicUrl. */
+  probePublicUrl?: (
+    url: string,
+  ) => Promise<{ ok: boolean; message?: string }>;
 };
 
 export const MAX_PROVIDER_ATTEMPTS = 3;
@@ -35,3 +44,5 @@ export const PROVISION_DEADLINE_MS = 5 * 60_000;
 /** Outlives zcli push (420s) plus HTTP readiness polling. */
 export const DEPLOY_DEADLINE_MS = 10 * 60_000;
 export const PROVISION_EMPTY_GRACE_MS = 180_000;
+/** Ready envs tolerate transient HTTP failures this long before failed. */
+export const READY_HEALTH_FAIL_MS = 5 * 60_000;

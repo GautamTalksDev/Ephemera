@@ -67,7 +67,7 @@ export function EnvironmentDetailPage() {
           <span className="mono">
             {env.repoFullName}#{env.prNumber}
           </span>
-          <StateBadge state={env.actualState} />
+          <StateBadge state={env.actualState} degraded={env.degraded} />
           <span className="mono muted">{env.id}</span>
           <div style={{ marginLeft: "auto" }}>
             <button
