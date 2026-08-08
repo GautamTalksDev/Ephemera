@@ -10,12 +10,20 @@
     "dev": "concurrently -n api,worker,web -c blue,magenta,green \"pnpm --filter @ephemera/api dev\" \"pnpm --filter @ephemera/worker dev\" \"pnpm --filter @ephemera/web dev\"",
     "build": "pnpm -r run build",
     "typecheck": "pnpm -r run typecheck",
-    "test": "pnpm --filter @ephemera/core test"
+    "test": "pnpm --filter @ephemera/core test",
+    "drive:mock-provider": "tsx scripts/drive-mock-provider.ts"
   },
 
+
+  "dependencies": {
+    "@ephemera/core": "workspace:*"
+  },
   "devDependencies": {
     "concurrently": "^9.2.1",
+    "tsx": "^4.20.5",
     "typescript": "^5.9.2"
   }
 }
+
+
 

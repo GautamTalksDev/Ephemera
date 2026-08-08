@@ -9,9 +9,7 @@ export const HealthResponseSchema = z.object({
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
-export const ProviderSchema = z.enum(["mock"]);
-export type Provider = z.infer<typeof ProviderSchema>;
-export const DEFAULT_PROVIDER: Provider = "mock";
+export const ProviderNameSchema = z.enum(["mock"]);
 
 export {
   ALLOWED_ENGINES,
@@ -37,3 +35,20 @@ export {
   type StaticService,
   type ValidateSpecResult,
 } from "./preview/index.js";
+
+export {
+  DEFAULT_PROVIDER,
+  MockProvider,
+  getProvider,
+  resetMockProviderState,
+  resetProviderCache,
+  type CreateEnvironmentInput,
+  type CreateEnvironmentResult,
+  type DeployCodeInput,
+  type DestroyEnvironmentInput,
+  type GetStatusInput,
+  type GetStatusResult,
+  type Provider,
+  type ProviderName,
+  type ProviderStatusState,
+} from "./provider/index.js";

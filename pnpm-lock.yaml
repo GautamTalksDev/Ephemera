@@ -7,10 +7,17 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@ephemera/core':
+        specifier: workspace:*
+        version: link:packages/core
     devDependencies:
       concurrently:
         specifier: ^9.2.1
         version: 9.2.4
+      tsx:
+        specifier: ^4.20.5
+        version: 4.23.11
       typescript:
         specifier: ^5.9.2
         version: 5.9.3
