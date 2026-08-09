@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  classifyPublicUrlStatus,
   evaluateZeropsStatus,
   mapZeropsServiceStatus,
+  probePublicUrl,
   ZeropsProvider,
 } from "./zerops.js";
 
@@ -206,8 +208,24 @@ describe("ZeropsProvider.getStatus with mocked service-list", () => {
       phase: "deployed",
     });
     expect(status.state).toBe("provisioning");
+    expect(status.httpProbe).toBe("wait");
     expect(status.publicUrl).toBe("https://pr1api-2c0f-3000.prg1.zerops.app");
     expect(status.message).toMatch(/returned 502/);
+  });
+
+  it("phase deployed: ACTIVE but public URL hard 4xx is failed", async () => {
+    mockFetch([dbActive, apiActive], "2c0f", 404);
+    const provider = new ZeropsProvider({
+      token: "test-token",
+      projectId: "proj",
+    });
+    const status = await provider.getStatus({
+      providerRef: "pr1",
+      phase: "deployed",
+    });
+    expect(status.state).toBe("failed");
+    expect(status.httpProbe).toBe("hard");
+    expect(status.message).toMatch(/returned 404/);
   });
 
   it("phase provisioned: all ACTIVE is also ready", async () => {
@@ -235,5 +253,29 @@ describe("ZeropsProvider.getStatus with mocked service-list", () => {
     });
     expect(status.state).toBe("provisioning");
     expect(status.message).toMatch(/no services found for providerRef/i);
+  });
+});
+
+describe("classifyPublicUrlStatus / probePublicUrl", () => {
+  it("treats 502/503/504 and 408/429 as wait", () => {
+    for (const status of [408, 429, 502, 503, 504, 500]) {
+      expect(classifyPublicUrlStatus(status)).toBe("wait");
+    }
+  });
+
+  it("treats other 4xx as hard", () => {
+    for (const status of [400, 401, 403, 404]) {
+      expect(classifyPublicUrlStatus(status)).toBe("hard");
+    }
+  });
+
+  it("maps connection errors to wait", async () => {
+    const fetchImpl = vi.fn().mockRejectedValue(new Error("ECONNRESET"));
+    const result = await probePublicUrl("https://example.test", fetchImpl);
+    expect(result).toMatchObject({
+      ok: false,
+      kind: "wait",
+    });
+    expect(result.message).toMatch(/not reachable/);
   });
 });

@@ -306,6 +306,101 @@ describe("reconcileOnce", () => {
     expect(final.actualState).not.toBe("pending");
   });
 
+  it("deploy probe 502 waits with info timeline events and does not burn attempts", async () => {
+    const { env } = await seedPending(11);
+    for (let i = 0; i < 40; i++) {
+      await reconcileOnce(env.id, deps);
+      const row = await getEnvironmentById(db, env.id);
+      if (row?.actualState === "deploying") {
+        break;
+      }
+    }
+    const deploying = await getEnvironmentById(db, env.id);
+    expect(deploying?.actualState).toBe("deploying");
+
+    let deployCalls = 0;
+    deps.provider = {
+      name: "deploy-502-stub",
+      async createEnvironment() {
+        return { providerRef: deploying!.providerRef! };
+      },
+      async deployCode() {
+        deployCalls += 1;
+      },
+      async getStatus(): Promise<GetStatusResult> {
+        return {
+          state: "provisioning",
+          publicUrl: "https://pr11api.example.test",
+          message: "public URL https://pr11api.example.test returned 502",
+          httpProbe: "wait",
+        };
+      },
+      async destroyEnvironment() {},
+    };
+    deps.deployDeadlineMs = 10 * 60_000;
+
+    const first = await reconcileOnce(env.id, deps);
+    expect(first.step).toBe("deploying-wait");
+    const mid = await getEnvironmentById(db, env.id);
+    expect(mid?.actualState).toBe("deploying");
+    expect(mid?.attemptCount).toBe(0);
+
+    const second = await reconcileOnce(env.id, deps);
+    expect(second.step).toBe("deploying-wait");
+    // publicUrl already present → must not re-push on every poll
+    expect(deployCalls).toBe(0);
+
+    const events = await listEventsForEnvironment(db, env.id);
+    const probeInfos = events.filter(
+      (e) => e.step === "deploy-probe" && e.level === "info" && /502/.test(e.message),
+    );
+    expect(probeInfos.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("deploy probe hard 4xx counts toward the attempt budget", async () => {
+    const { env } = await seedPending(12);
+    for (let i = 0; i < 40; i++) {
+      await reconcileOnce(env.id, deps);
+      const row = await getEnvironmentById(db, env.id);
+      if (row?.actualState === "deploying") {
+        break;
+      }
+    }
+    const deploying = await getEnvironmentById(db, env.id);
+    expect(deploying?.actualState).toBe("deploying");
+
+    deps.provider = {
+      name: "deploy-404-stub",
+      async createEnvironment() {
+        return { providerRef: deploying!.providerRef! };
+      },
+      async deployCode() {},
+      async getStatus(): Promise<GetStatusResult> {
+        return {
+          state: "failed",
+          publicUrl: "https://pr12api.example.test",
+          message: "public URL https://pr12api.example.test returned 404",
+          httpProbe: "hard",
+        };
+      },
+      async destroyEnvironment() {},
+    };
+    deps.maxAttempts = 2;
+
+    const first = await reconcileOnce(env.id, deps);
+    expect(first.step).toBe("deploy-probe-hard");
+    const mid = await getEnvironmentById(db, env.id);
+    expect(mid?.actualState).toBe("deploying");
+    expect(mid?.attemptCount).toBe(1);
+
+    const second = await reconcileOnce(env.id, deps);
+    expect(second.step).toBe("deploy-probe-failed");
+    const failed = await getEnvironmentById(db, env.id);
+    expect(failed?.actualState).toBe("failed");
+    expect(failed?.attemptCount).toBe(2);
+    expect(failed?.errorMessage).toMatch(/404/);
+  });
+
   it("ready + single HTTP 502 stays ready (degraded), recovers on pass", async () => {
     const { env } = await seedPending(5);
     deps.probePublicUrl = vi.fn(async () => ({ ok: true }));

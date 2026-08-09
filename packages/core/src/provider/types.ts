@@ -14,6 +14,8 @@ export type CreateEnvironmentResult = {
 };
 
 export type DeployCodeInput = {
+  /** Environment row id — keys deploy idempotency with `ref` (headSha). */
+  envId: string;
   providerRef: string;
   repoUrl: string;
   ref: string;
@@ -38,6 +40,11 @@ export type GetStatusResult = {
   state: ProviderStatusState;
   publicUrl?: string;
   message?: string;
+  /**
+   * Deploy-phase public URL probe classification (when probed).
+   * wait — gateway/conn soft failure; hard — other 4xx (burns attempt budget).
+   */
+  httpProbe?: "ok" | "wait" | "hard";
 };
 
 export type DestroyEnvironmentInput = {
@@ -50,7 +57,8 @@ export type DestroyEnvironmentInput = {
  * IDEMPOTENCY CONTRACT (load-bearing):
  * Every method must be safe to call more than once with the same input.
  * - createEnvironment: same envId returns the same providerRef; does not double-create.
- * - deployCode: repeating deploy for the same providerRef/repo/ref is a no-op success.
+ * - deployCode: repeating deploy for the same envId+ref (headSha) joins an in-flight
+ *   push or is a no-op after a successful push; never overlaps zcli pushes.
  * - getStatus: pure read of current state; never mutates provisioning progress.
  * - destroyEnvironment: destroying an already-destroyed (or unknown) ref succeeds.
  *

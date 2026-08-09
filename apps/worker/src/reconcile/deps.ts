@@ -20,7 +20,10 @@ export type ReconcileDeps = {
   maxAttempts?: number;
   /** Max time in provisioning poll before marking failed (default 5 min). */
   provisionDeadlineMs?: number;
-  /** Max time in deploying step before marking failed (default 10 min). */
+  /**
+   * Max time in deploying step before marking failed (default 10 min).
+   * Clock resets after the first successful deployCode so probes get the full window.
+   */
   deployDeadlineMs?: number;
   /**
    * After provision starts, treat "no services found" as wait this long
@@ -35,7 +38,7 @@ export type ReconcileDeps = {
   /** Injectable for tests — defaults to core probePublicUrl. */
   probePublicUrl?: (
     url: string,
-  ) => Promise<{ ok: boolean; message?: string }>;
+  ) => Promise<{ ok: boolean; kind?: "ok" | "wait" | "hard"; message?: string }>;
 };
 
 export const MAX_PROVIDER_ATTEMPTS = 3;

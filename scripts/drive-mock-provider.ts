@@ -52,12 +52,14 @@ async function runLifecycle(provider: Provider, label: string) {
   console.log(`  createEnvironment → ${first.providerRef}`);
 
   await provider.deployCode({
+    envId: ENV_ID,
     providerRef: first.providerRef,
     repoUrl: REPO_URL,
     ref: REF,
     spec,
   });
   await provider.deployCode({
+    envId: ENV_ID,
     providerRef: first.providerRef,
     repoUrl: REPO_URL,
     ref: REF,

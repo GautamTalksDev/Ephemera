@@ -9,7 +9,21 @@ import {
   type PreviewSpec,
   type Service,
 } from "../preview/schema.js";
-import { isZcliNotFoundError, runZcli, ZCLI_TIMEOUT_MS } from "./zerops-zcli.js";
+import {
+  isZcliNotFoundError,
+  runZcli,
+  ZCLI_PUSH_TIMEOUT_MS,
+  ZCLI_TIMEOUT_MS,
+} from "./zerops-zcli.js";
+import {
+  ensureServiceSubdomainAccess,
+  isBuildAction,
+  isProcessBusy,
+  publicUrlForHostname,
+  waitForZeropsProcess,
+  type SubdomainLogFn,
+  type ZeropsProcess,
+} from "./zerops-subdomain.js";
 import type {
   CreateEnvironmentInput,
   CreateEnvironmentResult,
@@ -307,11 +321,45 @@ function buildZeropsYamlForService(
 
 const PUBLIC_URL_PROBE_TIMEOUT_MS = 10_000;
 
-/** GET public URL; ready only on non-5xx (connection errors / 5xx → keep waiting). */
+export type PublicUrlProbeResult = {
+  ok: boolean;
+  /** ok | wait (soft) | hard (count toward attempt budget). */
+  kind: "ok" | "wait" | "hard";
+  status?: number;
+  message?: string;
+};
+
+/**
+ * Classify an HTTP status for deploy/ready probes.
+ * Soft wait: 408, 429, 502, 503, 504, and other 5xx (container still cycling).
+ * Hard: other 4xx (real client/app errors worth burning attempts on).
+ */
+export function classifyPublicUrlStatus(
+  status: number,
+): "ok" | "wait" | "hard" {
+  if (status >= 200 && status < 400) {
+    return "ok";
+  }
+  if (status === 408 || status === 429) {
+    return "wait";
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return "wait";
+  }
+  if (status >= 500) {
+    return "wait";
+  }
+  if (status >= 400) {
+    return "hard";
+  }
+  return "wait";
+}
+
+/** GET public URL; soft gateway/conn failures are wait, not hard errors. */
 export async function probePublicUrl(
   url: string,
   fetchImpl: typeof fetch = fetch,
-): Promise<{ ok: boolean; message?: string }> {
+): Promise<PublicUrlProbeResult> {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), PUBLIC_URL_PROBE_TIMEOUT_MS);
@@ -322,13 +370,16 @@ export async function probePublicUrl(
         signal: ctrl.signal,
         headers: { Accept: "*/*" },
       });
-      if (res.status >= 500) {
-        return {
-          ok: false,
-          message: `public URL ${url} returned ${res.status}`,
-        };
+      const kind = classifyPublicUrlStatus(res.status);
+      if (kind === "ok") {
+        return { ok: true, kind: "ok", status: res.status };
       }
-      return { ok: true };
+      return {
+        ok: false,
+        kind,
+        status: res.status,
+        message: `public URL ${url} returned ${res.status}`,
+      };
     } finally {
       clearTimeout(timer);
     }
@@ -336,6 +387,7 @@ export async function probePublicUrl(
     const msg = err instanceof Error ? err.message : String(err);
     return {
       ok: false,
+      kind: "wait",
       message: `public URL ${url} not reachable yet: ${msg}`,
     };
   }
@@ -569,12 +621,12 @@ export function evaluateZeropsStatus(
     services.find((s) => (s.ports?.length ?? 0) > 0);
 
   let publicUrl: string | undefined;
-  if (publicSvc && subdomainHost) {
+  if (publicSvc && subdomainHost && publicSvc.subdomainAccess) {
     const port =
       publicSvc.ports?.[0]?.port ??
       publicSvc.ports?.[0]?.httpPort ??
       undefined;
-    publicUrl = publicUrlFor(publicSvc.name, subdomainHost, port);
+    publicUrl = publicUrlForHostname(publicSvc.name, subdomainHost, port);
   }
 
   if (!publicUrl) {
@@ -591,16 +643,24 @@ export function evaluateZeropsStatus(
   };
 }
 
-function publicUrlFor(
-  hostname: string,
-  subdomainHost: string,
-  port: number | undefined,
-): string {
-  // https://{hostname}-{zeropsSubdomainHost}-{port}.prg1.zerops.app
-  if (port !== undefined && port > 0) {
-    return `https://${hostname}-${subdomainHost}-${port}.prg1.zerops.app`;
-  }
-  return `https://${hostname}-${subdomainHost}.prg1.zerops.app`;
+export type ZeropsProviderOptions = {
+  token?: string;
+  projectId?: string;
+  /** Timeline / ops sink for subdomain enable attempts. */
+  onLog?: SubdomainLogFn;
+};
+
+type DeployFlight = {
+  envId: string;
+  headSha: string;
+  deployStartedAt: number;
+  /** serviceStackId → appVersion id observed for the in-flight/completed push */
+  appVersionIdByService: Map<string, string>;
+  promise: Promise<void>;
+};
+
+function deployFlightKey(envId: string, headSha: string): string {
+  return `${envId}:${headSha}`;
 }
 
 export class ZeropsProvider implements Provider {
@@ -609,10 +669,12 @@ export class ZeropsProvider implements Provider {
   private readonly token: string;
   private readonly projectId: string;
   private loginReady: Promise<void> | undefined;
+  private onLog: SubdomainLogFn | undefined;
+  /** In-flight + completed pushes keyed by envId:headSha (process-local). */
+  private readonly deployFlights = new Map<string, DeployFlight>();
+  private readonly completedDeploys = new Set<string>();
 
-  constructor(
-    options: { token?: string; projectId?: string } = {},
-  ) {
+  constructor(options: ZeropsProviderOptions = {}) {
     // Zerops forbids custom env keys with a ZEROPS_ prefix on its own platform,
     // so the control-plane worker uses EPHEMERA_PREVIEW_* there. Local/dev still
     // uses ZEROPS_API_TOKEN / ZEROPS_PROJECT_ID.
@@ -622,6 +684,12 @@ export class ZeropsProvider implements Provider {
     this.projectId =
       options.projectId ??
       requireEnv("ZEROPS_PROJECT_ID", "EPHEMERA_PREVIEW_PROJECT_ID");
+    this.onLog = options.onLog;
+  }
+
+  /** Bind/clear the timeline sink (worker sets this per reconcile). */
+  setEventSink(onLog: SubdomainLogFn | undefined): void {
+    this.onLog = onLog;
   }
 
   private async ensureLogin(): Promise<void> {
@@ -654,10 +722,51 @@ export class ZeropsProvider implements Provider {
     }
   }
 
+  private async apiPut<T>(path: string, body?: unknown): Promise<T> {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ZCLI_TIMEOUT_MS);
+    try {
+      const init: RequestInit = {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          Accept: "application/json",
+          ...(body !== undefined
+            ? { "Content-Type": "application/json" }
+            : {}),
+        },
+        signal: ctrl.signal,
+      };
+      if (body !== undefined) {
+        init.body = JSON.stringify(body);
+      }
+      const res = await fetch(`${ZEROPS_API_BASE}${path}`, init);
+      const text = await res.text();
+      if (!res.ok) {
+        throw new Error(
+          `Zerops API PUT ${path} → ${res.status}\n${text.slice(0, 2000)}`,
+        );
+      }
+      return (text ? JSON.parse(text) : {}) as T;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async listServiceStacks(): Promise<ZeropsServiceStack[]> {
     const body = await this.apiGet<{ list: ZeropsServiceStack[] }>(
       `/project/${this.projectId}/service-stack`,
     );
+    return body.list ?? [];
+  }
+
+  private async listServiceProcesses(serviceId: string): Promise<ZeropsProcess[]> {
+    const body = await this.apiGet<{ list?: ZeropsProcess[] } | ZeropsProcess[]>(
+      `/service-stack/${serviceId}/process`,
+    );
+    if (Array.isArray(body)) {
+      return body;
+    }
     return body.list ?? [];
   }
 
@@ -670,6 +779,109 @@ export class ZeropsProvider implements Provider {
     return all.filter(
       (s) => !s.isSystem && hostnameMatchesPrefix(s.name, providerRef),
     );
+  }
+
+  /**
+   * Import-time enableSubdomainAccess can race under concurrent creates.
+   * Explicitly enable + poll until the API reports access and DNS resolves.
+   * Waits for ACTIVE + no busy processes before issuing enable.
+   */
+  private async ensurePublicSubdomains(
+    services: ZeropsServiceStack[],
+    project: ZeropsProject,
+  ): Promise<void> {
+    const subdomainHost = project.zeropsSubdomainHost?.trim();
+    if (!subdomainHost) {
+      await this.onLog?.({
+        level: "error",
+        step: "subdomain",
+        message: "project.zeropsSubdomainHost missing; cannot enable public URL",
+      });
+      return;
+    }
+
+    const candidates = services.filter(
+      (s) =>
+        !isDatabaseStack(s) &&
+        !s.isSystem &&
+        (s.ports?.length ?? 0) > 0,
+    );
+
+    for (const svc of candidates) {
+      const port =
+        svc.ports?.[0]?.port ?? svc.ports?.[0]?.httpPort ?? undefined;
+      const result = await ensureServiceSubdomainAccess({
+        serviceId: svc.id,
+        serviceName: svc.name,
+        subdomainHost,
+        ...(port !== undefined ? { port } : {}),
+        apiGet: (path) => this.apiGet(path),
+        apiPut: (path, body) => this.apiPut(path, body),
+        getStack: async () => {
+          const all = await this.listServiceStacks();
+          return all.find((s) => s.id === svc.id);
+        },
+        listProcesses: () => this.listServiceProcesses(svc.id),
+        ...(this.onLog ? { onLog: this.onLog } : {}),
+      });
+      if (!result.ok) {
+        throw new Error(result.message);
+      }
+    }
+  }
+
+  /**
+   * If a build/deploy process is already PENDING/RUNNING for this stack, wait
+   * for it instead of starting another zcli push.
+   */
+  private async waitOutBusyBuild(
+    serviceId: string,
+    serviceName: string,
+    flight: DeployFlight,
+  ): Promise<boolean> {
+    const procs = await this.listServiceProcesses(serviceId);
+    const busy = procs.find(
+      (p) => isBuildAction(p.actionName) && isProcessBusy(p.status),
+    );
+    if (!busy) {
+      return false;
+    }
+    const appVersionId = busy.appVersion?.id;
+    if (appVersionId) {
+      flight.appVersionIdByService.set(serviceId, appVersionId);
+    }
+    await this.onLog?.({
+      level: "info",
+      step: "deploy",
+      message:
+        `${serviceName}: build already ${busy.status} (process ${busy.id}` +
+        (appVersionId ? `, appVersion ${appVersionId}` : "") +
+        ") — waiting, not starting another push",
+    });
+    await waitForZeropsProcess(busy.id, {
+      apiGet: (path) => this.apiGet(path),
+      timeoutMs: ZCLI_PUSH_TIMEOUT_MS,
+      step: "deploy",
+      ...(this.onLog ? { onLog: this.onLog } : {}),
+    });
+    return true;
+  }
+
+  private async recordAppVersionAfterPush(
+    serviceId: string,
+    flight: DeployFlight,
+  ): Promise<void> {
+    try {
+      const procs = await this.listServiceProcesses(serviceId);
+      const build = procs.find(
+        (p) => isBuildAction(p.actionName) && p.appVersion?.id,
+      );
+      if (build?.appVersion?.id) {
+        flight.appVersionIdByService.set(serviceId, build.appVersion.id);
+      }
+    } catch {
+      /* best-effort */
+    }
   }
 
   async createEnvironment(
@@ -723,6 +935,62 @@ export class ZeropsProvider implements Provider {
   }
 
   async deployCode(input: DeployCodeInput): Promise<void> {
+    const key = deployFlightKey(input.envId, input.ref);
+    const existing = this.deployFlights.get(key);
+    if (existing) {
+      await this.onLog?.({
+        level: "info",
+        step: "deploy",
+        message:
+          `deploy already in flight for env ${input.envId} @ ${input.ref.slice(0, 7)} ` +
+          `(started ${new Date(existing.deployStartedAt).toISOString()}` +
+          (existing.appVersionIdByService.size > 0
+            ? `; appVersions=${[...existing.appVersionIdByService.values()].join(",")}`
+            : "") +
+          ") — joining existing push",
+      });
+      return existing.promise;
+    }
+
+    if (this.completedDeploys.has(key)) {
+      await this.onLog?.({
+        level: "info",
+        step: "deploy",
+        message:
+          `deploy already completed for env ${input.envId} @ ${input.ref.slice(0, 7)} — ` +
+          "skipping push; ensuring public subdomains only",
+      });
+      await this.ensureLogin();
+      const project = await this.getProject();
+      const stacks = await this.servicesForRef(input.providerRef);
+      await this.ensurePublicSubdomains(stacks, project);
+      return;
+    }
+
+    const flight: DeployFlight = {
+      envId: input.envId,
+      headSha: input.ref,
+      deployStartedAt: Date.now(),
+      appVersionIdByService: new Map(),
+      promise: Promise.resolve(),
+    };
+    flight.promise = this.runDeployCode(input, flight)
+      .then(() => {
+        this.completedDeploys.add(key);
+      })
+      .finally(() => {
+        if (this.deployFlights.get(key) === flight) {
+          this.deployFlights.delete(key);
+        }
+      });
+    this.deployFlights.set(key, flight);
+    return flight.promise;
+  }
+
+  private async runDeployCode(
+    input: DeployCodeInput,
+    flight: DeployFlight,
+  ): Promise<void> {
     const prNumber = prNumberFromProviderRef(input.providerRef);
     const deployable = input.spec.services.filter(
       (s) => s.type === "runtime" || s.type === "static",
@@ -732,6 +1000,14 @@ export class ZeropsProvider implements Provider {
     }
 
     await this.ensureLogin();
+
+    await this.onLog?.({
+      level: "info",
+      step: "deploy",
+      message:
+        `deploy starting for env ${input.envId} @ ${input.ref.slice(0, 7)} ` +
+        `(${deployable.length} service(s))`,
+    });
 
     const workRoot = await mkdtemp(join(tmpdir(), "ephemera-zerops-deploy-"));
     const repoDir = join(workRoot, "repo");
@@ -745,9 +1021,24 @@ export class ZeropsProvider implements Provider {
           : {}),
       });
 
+      const stacks = await this.servicesForRef(input.providerRef);
+      const stackByName = new Map(stacks.map((s) => [s.name, s]));
       const serviceNames = new Set(input.spec.services.map((s) => s.name));
+
       for (const svc of deployable) {
         const hostname = serviceHostname(prNumber, svc.name);
+        const stack = stackByName.get(hostname);
+        if (stack) {
+          const waited = await this.waitOutBusyBuild(
+            stack.id,
+            hostname,
+            flight,
+          );
+          if (waited) {
+            continue;
+          }
+        }
+
         const yaml = buildZeropsYamlForService(
           hostname,
           svc,
@@ -756,6 +1047,11 @@ export class ZeropsProvider implements Provider {
         );
         const yamlPath = join(repoDir, "zerops.yml");
         await writeFile(yamlPath, yamlStringify(yaml), "utf8");
+        await this.onLog?.({
+          level: "info",
+          step: "deploy",
+          message: `${hostname}: zcli service push starting`,
+        });
         await runZcli(
           [
             "service",
@@ -773,14 +1069,31 @@ export class ZeropsProvider implements Provider {
           ],
           { cwd: repoDir },
         );
+        if (stack) {
+          await this.recordAppVersionAfterPush(stack.id, flight);
+          const appVersionId = flight.appVersionIdByService.get(stack.id);
+          await this.onLog?.({
+            level: "info",
+            step: "deploy",
+            message:
+              `${hostname}: zcli push finished` +
+              (appVersionId ? ` (appVersion ${appVersionId})` : ""),
+          });
+        }
       }
+
+      // Concurrent imports often leave enableSubdomainAccess stuck off — fix here.
+      // Idle/ACTIVE gate inside ensure prevents enable while build still drains.
+      const project = await this.getProject();
+      const freshStacks = await this.servicesForRef(input.providerRef);
+      await this.ensurePublicSubdomains(freshStacks, project);
     } finally {
       await rm(workRoot, { recursive: true, force: true });
     }
   }
 
   async getStatus(input: GetStatusInput): Promise<GetStatusResult> {
-    const services = await this.servicesForRef(input.providerRef);
+    let services = await this.servicesForRef(input.providerRef);
     if (services.length === 0) {
       // During provision, empty list is a wait (stacks may not be listable yet).
       // After deploy, empty is a hard failure.
@@ -797,27 +1110,64 @@ export class ZeropsProvider implements Provider {
     }
 
     const project = await this.getProject();
+
+    // Deployed phase: recover stuck subdomain toggles before readiness checks.
+    if (input.phase === "deployed") {
+      const needsEnable = services.some(
+        (s) =>
+          !isDatabaseStack(s) &&
+          (s.ports?.length ?? 0) > 0 &&
+          !s.subdomainAccess,
+      );
+      if (needsEnable) {
+        try {
+          await this.ensurePublicSubdomains(services, project);
+          services = await this.servicesForRef(input.providerRef);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          return {
+            state: "provisioning",
+            message: `waiting for public subdomain: ${message}`,
+            httpProbe: "wait",
+          };
+        }
+      }
+    }
+
     const status = evaluateZeropsStatus(services, project, input.phase);
 
     // ACTIVE alone is not enough — crash-looping apps still report ACTIVE.
-    // Probe the public URL and keep waiting on 5xx / connection errors.
+    // Soft probe failures (502/503/504/conn) → wait; hard 4xx → failed.
     if (
       input.phase === "deployed" &&
       status.state === "ready" &&
       status.publicUrl
     ) {
       const probe = await probePublicUrl(status.publicUrl);
-      if (!probe.ok) {
-        const waiting: GetStatusResult = {
-          state: "provisioning",
-          publicUrl: status.publicUrl,
-        };
-        const message = probe.message ?? status.message;
-        if (message !== undefined) {
-          waiting.message = message;
-        }
-        return waiting;
+      if (probe.ok) {
+        return { ...status, httpProbe: "ok" };
       }
+      const message = probe.message ?? status.message;
+      if (probe.kind === "hard") {
+        const hard: GetStatusResult = {
+          state: "failed",
+          publicUrl: status.publicUrl,
+          httpProbe: "hard",
+        };
+        if (message !== undefined) {
+          hard.message = message;
+        }
+        return hard;
+      }
+      const waiting: GetStatusResult = {
+        state: "provisioning",
+        publicUrl: status.publicUrl,
+        httpProbe: "wait",
+      };
+      if (message !== undefined) {
+        waiting.message = message;
+      }
+      return waiting;
     }
 
     return status;

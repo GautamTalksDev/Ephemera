@@ -155,6 +155,7 @@ async function runLifecycle(label: string, repoUrl: string) {
 
   t0 = now();
   await provider.deployCode({
+    envId: ENV_ID,
     providerRef: created.providerRef,
     repoUrl,
     ref: "main",

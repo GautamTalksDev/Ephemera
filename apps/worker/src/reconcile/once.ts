@@ -9,6 +9,7 @@ import {
 } from "@ephemera/api/db";
 import {
   PreviewSpecSchema,
+  ZeropsProvider,
   githubHttpsCloneUrlFromFullName,
   parsePreviewSpec,
   probePublicUrl as defaultProbePublicUrl,
@@ -188,16 +189,34 @@ export async function reconcileOnce(
     };
   }
 
-  const from = `${claimed.desiredState}/${claimed.actualState}`;
-  const result = await takeOneStep(claimed, deps);
-  return {
-    environmentId,
-    claimed: true,
-    changed: result.changed,
-    from,
-    to: result.to,
-    step: result.step,
-  };
+  // Pipe Zerops subdomain enable attempts into the environment timeline.
+  const zerops =
+    deps.provider instanceof ZeropsProvider ? deps.provider : undefined;
+  zerops?.setEventSink((entry) => {
+    void appendEvent(deps.db, {
+      environmentId,
+      level: entry.level,
+      step: entry.step,
+      message: entry.message,
+    }).catch((err: unknown) => {
+      console.error("failed to append subdomain event", err);
+    });
+  });
+
+  try {
+    const from = `${claimed.desiredState}/${claimed.actualState}`;
+    const result = await takeOneStep(claimed, deps);
+    return {
+      environmentId,
+      claimed: true,
+      changed: result.changed,
+      from,
+      to: result.to,
+      step: result.step,
+    };
+  } finally {
+    zerops?.setEventSink(undefined);
+  }
 }
 
 async function takeOneStep(
@@ -540,27 +559,46 @@ async function deployingStep(
   const repoUrl = githubHttpsCloneUrlFromFullName(repo.fullName);
 
   const deadlineMs = deps.deployDeadlineMs ?? DEPLOY_DEADLINE_MS;
-  const elapsed = msInCurrentActualState(env);
+  let current = env;
+  let elapsed = msInCurrentActualState(current);
 
   try {
-    await deps.provider.deployCode({
-      providerRef: env.providerRef,
-      repoUrl,
-      ref: env.headSha,
-      spec,
-      installationToken: repo.installationToken,
-    });
-
-    const status = await deps.provider.getStatus({
-      providerRef: env.providerRef,
+    // Probe first: if a public URL already exists (post-push), do not re-run
+    // zcli push — that was burning the deploy deadline before the app warmed up.
+    let status = await deps.provider.getStatus({
+      providerRef: current.providerRef!,
       phase: "deployed",
     });
+
+    const alreadyServing = Boolean(status.publicUrl) || status.state === "ready";
+    if (!alreadyServing) {
+      await deps.provider.deployCode({
+        envId: current.id,
+        providerRef: current.providerRef!,
+        repoUrl,
+        ref: current.headSha,
+        spec,
+        installationToken: repo.installationToken,
+      });
+      // Full 10m probe window starts after push completes, not when deploying began.
+      const clockReset = await updateEnvironmentState(deps.db, current.id, {
+        actualStateEnteredAt: new Date(),
+      });
+      if (clockReset) {
+        current = clockReset;
+      }
+      elapsed = msInCurrentActualState(current);
+      status = await deps.provider.getStatus({
+        providerRef: current.providerRef!,
+        phase: "deployed",
+      });
+    }
 
     if (status.state === "ready") {
       // Invariant: ready always carries a public URL for the dashboard/PR comment.
       if (!status.publicUrl) {
         await appendEvent(deps.db, {
-          environmentId: env.id,
+          environmentId: current.id,
           level: "error",
           step: "deploy",
           message:
@@ -569,7 +607,7 @@ async function deployingStep(
         if (elapsed >= deadlineMs) {
           const next = await markPollFailed(
             deps,
-            env,
+            current,
             "deploy",
             "deploy timed out: getStatus ready but publicUrl was never set",
           );
@@ -581,9 +619,18 @@ async function deployingStep(
         }
         return {
           changed: false,
-          to: `${env.desiredState}/${env.actualState}`,
+          to: `${current.desiredState}/${current.actualState}`,
           step: "deploying-wait-url",
         };
+      }
+
+      if (status.httpProbe === "ok" || status.httpProbe === undefined) {
+        await appendEvent(deps.db, {
+          environmentId: current.id,
+          level: "info",
+          step: "deploy-probe",
+          message: `public URL probe ok: ${status.publicUrl}`,
+        });
       }
 
       // Refresh TTL from the repo's current default (env var fallback) so
@@ -592,14 +639,14 @@ async function deployingStep(
       const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
       const updated = await succeedStep(
         deps,
-        env,
+        current,
         {
           actualState: "ready",
           publicUrl: status.publicUrl,
           errorMessage: null,
           degraded: false,
           healthFailedSince: null,
-          reconciledSha: env.headSha,
+          reconciledSha: current.headSha,
           expiresAt,
         },
         "deploy",
@@ -612,11 +659,21 @@ async function deployingStep(
       };
     }
 
-    if (status.state === "provisioning") {
+    // Soft HTTP readiness (502/503/504/conn/408/429) — wait, do not burn attempts.
+    if (status.state === "provisioning" || status.httpProbe === "wait") {
+      const probeMsg =
+        status.message ??
+        `deploy still waiting (elapsed ${Math.round(elapsed / 1000)}s / ${Math.round(deadlineMs / 1000)}s)`;
+      await appendEvent(deps.db, {
+        environmentId: current.id,
+        level: "info",
+        step: "deploy-probe",
+        message: probeMsg,
+      });
       if (elapsed >= deadlineMs) {
         const next = await markPollFailed(
           deps,
-          env,
+          current,
           "deploy",
           status.message ??
             `deploy timed out after ${Math.round(deadlineMs / 1000)}s`,
@@ -629,16 +686,31 @@ async function deployingStep(
       }
       return {
         changed: false,
-        to: `${env.desiredState}/${env.actualState}`,
+        to: `${current.desiredState}/${current.actualState}`,
         step: "deploying-wait",
       };
     }
 
-    // failed — retry until deadline
+    // Hard public-URL failures (4xx other than 408/429) burn the attempt budget.
+    if (status.httpProbe === "hard") {
+      const { failed, env: next } = await recordErrorAttempt(
+        deps,
+        current,
+        "deploy-probe",
+        status.message ?? "public URL probe hard failure",
+      );
+      return {
+        changed: true,
+        to: `${next.desiredState}/${next.actualState}`,
+        step: failed ? "deploy-probe-failed" : "deploy-probe-hard",
+      };
+    }
+
+    // Other provider failures — retry until deadline.
     if (elapsed >= deadlineMs) {
       const next = await markPollFailed(
         deps,
-        env,
+        current,
         "deploy",
         status.message ?? "provider reported failed after deploy",
       );
@@ -649,22 +721,23 @@ async function deployingStep(
       };
     }
     await appendEvent(deps.db, {
-      environmentId: env.id,
+      environmentId: current.id,
       level: "error",
       step: "deploy",
       message: `${status.message ?? "provider reported failed after deploy"} (waiting until deploy deadline)`,
     });
     return {
       changed: false,
-      to: `${env.desiredState}/${env.actualState}`,
+      to: `${current.desiredState}/${current.actualState}`,
       step: "deploying-retry",
     };
   } catch (err) {
     const raw = err instanceof Error ? err.message : String(err);
     // Never persist installation tokens that may appear in git remote URLs.
     const message = redactGitSecrets(raw, [repo.installationToken]);
+    elapsed = msInCurrentActualState(current);
     if (elapsed >= deadlineMs) {
-      const next = await markPollFailed(deps, env, "deploy", message);
+      const next = await markPollFailed(deps, current, "deploy", message);
       return {
         changed: true,
         to: `${next.desiredState}/${next.actualState}`,
@@ -672,14 +745,14 @@ async function deployingStep(
       };
     }
     await appendEvent(deps.db, {
-      environmentId: env.id,
+      environmentId: current.id,
       level: "error",
       step: "deploy",
       message: `${message} (waiting until deploy deadline)`,
     });
     return {
       changed: false,
-      to: `${env.desiredState}/${env.actualState}`,
+      to: `${current.desiredState}/${current.actualState}`,
       step: "deploy-error-wait",
     };
   }
