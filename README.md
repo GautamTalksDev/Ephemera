@@ -11,6 +11,10 @@ Open a pull request → Ephemera provisions a throwaway stack, posts a working U
   there and Ephemera provisions a preview for it. Or press **Run live demo** on
   the dashboard.
 
+Dashboard mutations (destroy, retry, extend TTL, run demo) require an admin
+token, supplied privately in the hackathon submission. Viewing environments is
+public — the live demo environment above is always reachable.
+
 ## Architecture
 
 ```
@@ -135,15 +139,12 @@ Content type: `application/json`. Secret: same as `GITHUB_WEBHOOK_SECRET`. Event
 
 ## Security & scope (v0.1)
 
-- The dashboard is unauthenticated. Deliberate for this release — Ephemera is
-  meant to run inside a trusted network or behind your own auth proxy. Auth is
-  the first item on the roadmap.
+- Dashboard mutations require `EPHEMERA_ADMIN_TOKEN` (Bearer). Reads stay public
+  so the live demo is always viewable; the token is not committed here.
 - GitHub tokens are stored per-repo in the control-plane database and are never
   returned by the API.
 - Webhook payloads are verified with HMAC-SHA256 over the raw request body.
 - Preview environments are isolated per PR and destroyed on close or TTL expiry.
-
-Naming the gap yourself is worth more than hoping nobody looks.
 
 ## AI tools used
 
