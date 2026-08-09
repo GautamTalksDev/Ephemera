@@ -1,23 +1,38 @@
 import { Hono } from "hono";
 import { desc, eq } from "drizzle-orm";
+import {
+  getAllowedRepoOwnersFromEnv,
+  requireRepoFullName,
+} from "@ephemera/core";
+import { deriveWaitingOn } from "@ephemera/core/environment";
 import type { Db } from "../db/client.js";
 import {
+  appendEvent,
   countActiveEnvironments,
   ensureRepo,
   getEnvironmentById,
   getEnvironmentByRepoAndPr,
+  getRepoById,
   listEventsForEnvironment,
+  occupiesConcurrencySlot,
   updateEnvironmentState,
   upsertEnvironmentForPr,
+  withEnvironmentConcurrencyLock,
 } from "../db/index.js";
 import { fetchBranchHeadSha } from "../github/client.js";
 import { environments, repos } from "../db/schema.js";
+import { clientIpFromHeaders, takeRateLimit } from "../rate-limit.js";
 import { enqueueReconcile } from "../queue/reconcile.js";
-import { getMaxConcurrentEnvsFromEnv } from "../webhooks/github.js";
+import {
+  getDefaultTtlMinutesFromEnv,
+  getMaxConcurrentEnvsFromEnv,
+} from "../webhooks/github.js";
 
 /** Fixed high PR number so the live demo never collides with a real PR env. */
 const LIVE_DEMO_PR_NUMBER = 9001;
-const LIVE_DEMO_REPO = "GautamTalksDev/ephemera-demo-app";
+const LIVE_DEMO_REPO = requireRepoFullName(
+  "GautamTalksDev/ephemera-demo-app",
+).fullName;
 const LIVE_DEMO_BRANCH = "main";
 
 const PLACEHOLDER_SPEC: Record<string, unknown> = {
@@ -26,13 +41,8 @@ const PLACEHOLDER_SPEC: Record<string, unknown> = {
   services: [],
 };
 
-const ACTIVE_SLOT_STATES = new Set([
-  "pending",
-  "provisioning",
-  "deploying",
-  "ready",
-  "destroying",
-]);
+const DEMO_RATE_LIMIT = 3;
+const DEMO_RATE_WINDOW_MS = 60_000;
 
 export type EnvironmentListItem = {
   id: string;
@@ -54,48 +64,6 @@ export type EnvironmentListItem = {
   waitingOn: string;
 };
 
-function waitingOn(env: {
-  actualState: string;
-  desiredState: string;
-  errorMessage: string | null;
-  degraded: boolean;
-  expiresAt: Date;
-}): string {
-  if (env.actualState === "failed") {
-    return env.errorMessage ?? "failed — see error message";
-  }
-  if (env.desiredState === "destroyed" && env.actualState !== "destroyed") {
-    if (env.actualState === "destroying") {
-      return "waiting for provider destroyEnvironment to finish";
-    }
-    return "queued to destroy provider resources";
-  }
-  switch (env.actualState) {
-    case "pending":
-      return "waiting to fetch preview.yml and call createEnvironment";
-    case "provisioning":
-      return "waiting for provider getStatus → ready";
-    case "deploying":
-      return "waiting for deployCode + getStatus → ready";
-    case "ready":
-      if (env.expiresAt.getTime() <= Date.now()) {
-        return "TTL expired — waiting for reaper/reconciler to destroy";
-      }
-      if (env.degraded) {
-        return env.errorMessage
-          ? `degraded — ${env.errorMessage}`
-          : "degraded — public URL health check failing";
-      }
-      return "live";
-    case "destroying":
-      return "waiting for provider destroyEnvironment to finish";
-    case "destroyed":
-      return "destroyed";
-    default:
-      return `waiting (${env.actualState})`;
-  }
-}
-
 function serializeEnv(
   row: typeof environments.$inferSelect & { repoFullName: string },
 ): EnvironmentListItem {
@@ -116,7 +84,8 @@ function serializeEnv(
     lastReconciledAt: row.lastReconciledAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-    waitingOn: waitingOn(row),
+    // Same helper the dashboard uses — always from current row fields.
+    waitingOn: deriveWaitingOn(row),
   };
 }
 
@@ -144,6 +113,7 @@ export function environmentRoutes(db: Db): Hono {
         lastReconciledAt: environments.lastReconciledAt,
         attemptCount: environments.attemptCount,
         reconciledSha: environments.reconciledSha,
+        isDemo: environments.isDemo,
         createdAt: environments.createdAt,
         updatedAt: environments.updatedAt,
         repoFullName: repos.fullName,
@@ -179,6 +149,7 @@ export function environmentRoutes(db: Db): Hono {
         lastReconciledAt: environments.lastReconciledAt,
         attemptCount: environments.attemptCount,
         reconciledSha: environments.reconciledSha,
+        isDemo: environments.isDemo,
         createdAt: environments.createdAt,
         updatedAt: environments.updatedAt,
         repoFullName: repos.fullName,
@@ -216,11 +187,172 @@ export function environmentRoutes(db: Db): Hono {
     return c.json({ ok: true, environmentId: id, desiredState: "destroyed" });
   });
 
+  /** Manual recovery: failed → pending and re-enqueue reconcile. */
+  app.post("/environments/:id/retry", async (c) => {
+    const id = c.req.param("id");
+    const existing = await getEnvironmentById(db, id);
+    if (!existing) {
+      return c.json({ ok: false, error: "not found" }, 404);
+    }
+    if (existing.actualState !== "failed") {
+      return c.json(
+        {
+          ok: false,
+          error: `can only retry failed environments (current: ${existing.actualState})`,
+        },
+        409,
+      );
+    }
+    if (existing.desiredState === "destroyed") {
+      return c.json(
+        { ok: false, error: "cannot retry an environment marked for destroy" },
+        409,
+      );
+    }
+
+    await updateEnvironmentState(db, id, {
+      actualState: "pending",
+      desiredState: "running",
+      attemptCount: 0,
+      errorMessage: null,
+      degraded: false,
+      healthFailedSince: null,
+      reconciledSha: null,
+    });
+    await appendEvent(db, {
+      environmentId: id,
+      level: "info",
+      step: "retry",
+      message: "manual retry: reset failed → pending",
+    });
+    await enqueueReconcile(id);
+    return c.json({
+      ok: true,
+      environmentId: id,
+      actualState: "pending",
+      desiredState: "running",
+    });
+  });
+
+  /**
+   * Extend TTL: expiresAt = max(now, current) + minutes.
+   * Body `{ minutes?: number }` — default is the repo's defaultTtlMinutes
+   * (falling back to PREVIEW_TTL_MINUTES).
+   */
+  app.patch("/environments/:id/ttl", async (c) => {
+    const id = c.req.param("id");
+    const existing = await getEnvironmentById(db, id);
+    if (!existing) {
+      return c.json({ ok: false, error: "not found" }, 404);
+    }
+    if (
+      existing.desiredState === "destroyed" ||
+      existing.actualState === "destroyed"
+    ) {
+      return c.json(
+        { ok: false, error: "cannot extend TTL on a destroyed environment" },
+        409,
+      );
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as {
+      minutes?: unknown;
+    };
+    const repo = await getRepoById(db, existing.repoId);
+    const defaultMinutes =
+      repo && repo.defaultTtlMinutes > 0
+        ? repo.defaultTtlMinutes
+        : getDefaultTtlMinutesFromEnv();
+
+    let minutes = defaultMinutes;
+    if (body.minutes !== undefined) {
+      const n = Number(body.minutes);
+      if (!Number.isFinite(n) || n <= 0) {
+        return c.json(
+          { ok: false, error: "minutes must be a positive number" },
+          400,
+        );
+      }
+      minutes = Math.trunc(n);
+    }
+
+    const base = Math.max(Date.now(), existing.expiresAt.getTime());
+    const expiresAt = new Date(base + minutes * 60_000);
+    const updated = await updateEnvironmentState(db, id, { expiresAt });
+    if (!updated) {
+      return c.json({ ok: false, error: "update failed" }, 500);
+    }
+
+    await appendEvent(db, {
+      environmentId: id,
+      level: "info",
+      step: "ttl",
+      message: `TTL extended by ${minutes}m → ${expiresAt.toISOString()}`,
+    });
+
+    const [row] = await db
+      .select({
+        id: environments.id,
+        repoId: environments.repoId,
+        prNumber: environments.prNumber,
+        headSha: environments.headSha,
+        branch: environments.branch,
+        providerRef: environments.providerRef,
+        desiredState: environments.desiredState,
+        actualState: environments.actualState,
+        actualStateEnteredAt: environments.actualStateEnteredAt,
+        publicUrl: environments.publicUrl,
+        errorMessage: environments.errorMessage,
+        degraded: environments.degraded,
+        healthFailedSince: environments.healthFailedSince,
+        specJson: environments.specJson,
+        expiresAt: environments.expiresAt,
+        lastReconciledAt: environments.lastReconciledAt,
+        attemptCount: environments.attemptCount,
+        reconciledSha: environments.reconciledSha,
+        isDemo: environments.isDemo,
+        createdAt: environments.createdAt,
+        updatedAt: environments.updatedAt,
+        repoFullName: repos.fullName,
+      })
+      .from(environments)
+      .innerJoin(repos, eq(environments.repoId, repos.id))
+      .where(eq(environments.id, id))
+      .limit(1);
+
+    if (!row) {
+      return c.json({ ok: false, error: "not found after update" }, 404);
+    }
+
+    return c.json({
+      ok: true,
+      environment: serializeEnv(row),
+      expiresAt: expiresAt.toISOString(),
+      extendedByMinutes: minutes,
+    });
+  });
+
   /**
    * Provisions a real preview of GautamTalksDev/ephemera-demo-app@main.
    * Resolves HEAD at click time; uses PR #9001 so it never collides with a real PR.
    */
   app.post("/demo/run", async (c) => {
+    const ip = clientIpFromHeaders({
+      get: (name) => c.req.header(name),
+    });
+    const limited = takeRateLimit(
+      `demo:${ip}`,
+      DEMO_RATE_LIMIT,
+      DEMO_RATE_WINDOW_MS,
+    );
+    if (!limited.allowed) {
+      c.header("Retry-After", String(limited.retryAfterSec));
+      return c.json(
+        { ok: false, error: "rate limit exceeded (3 requests/minute)" },
+        429,
+      );
+    }
+
     const token = process.env.GITHUB_TOKEN?.trim();
     if (!token) {
       return c.json(
@@ -249,6 +381,16 @@ export function environmentRoutes(db: Db): Hono {
       );
     }
 
+    // Re-validate at the entry point (format + optional owner allowlist).
+    try {
+      requireRepoFullName(LIVE_DEMO_REPO, {
+        allowedOwners: getAllowedRepoOwnersFromEnv(),
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ ok: false, error: message }, 403);
+    }
+
     const ttlMinutes =
       Number(process.env.PREVIEW_TTL_MINUTES ?? 60) || 60;
     const repo = await ensureRepo(db, {
@@ -257,56 +399,66 @@ export function environmentRoutes(db: Db): Hono {
       defaultTtlMinutes: ttlMinutes,
     });
 
-    const existing = await getEnvironmentByRepoAndPr(
-      db,
-      repo.id,
-      LIVE_DEMO_PR_NUMBER,
-    );
-    const existingOccupiesSlot = Boolean(
-      existing &&
-        existing.desiredState === "running" &&
-        ACTIVE_SLOT_STATES.has(existing.actualState),
-    );
-
     const max = getMaxConcurrentEnvsFromEnv();
-    const active = await countActiveEnvironments(db, existing?.id);
-    if (!existingOccupiesSlot && active >= max) {
+
+    const outcome = await withEnvironmentConcurrencyLock(db, async (tx) => {
+      const existing = await getEnvironmentByRepoAndPr(
+        tx,
+        repo.id,
+        LIVE_DEMO_PR_NUMBER,
+      );
+      const existingOccupiesSlot = Boolean(
+        existing && occupiesConcurrencySlot(existing),
+      );
+
+      if (!existingOccupiesSlot) {
+        const active = await countActiveEnvironments(tx, existing?.id);
+        if (active >= max) {
+          return { kind: "limit" as const, active, max };
+        }
+      }
+
+      const env = await upsertEnvironmentForPr(tx, {
+        repoId: repo.id,
+        prNumber: LIVE_DEMO_PR_NUMBER,
+        headSha,
+        branch: LIVE_DEMO_BRANCH,
+        ttlMinutes: repo.defaultTtlMinutes,
+        specJson: PLACEHOLDER_SPEC,
+        desiredState: "running",
+        actualState: "pending",
+        errorMessage: null,
+        providerRef: null,
+        publicUrl: null,
+        isDemo: true,
+      });
+
+      await updateEnvironmentState(tx, env.id, {
+        attemptCount: 0,
+        reconciledSha: null,
+        errorMessage: null,
+        providerRef: null,
+        publicUrl: null,
+        actualState: "pending",
+      });
+
+      return { kind: "ok" as const, env };
+    });
+
+    if (outcome.kind === "limit") {
       return c.json(
         {
           ok: false,
-          error: `Maximum concurrent environments reached (${active}/${max}). Destroy an existing environment before running the live demo.`,
+          error: `Maximum concurrent environments reached (${outcome.active}/${outcome.max}). Destroy an existing environment before running the live demo.`,
         },
         409,
       );
     }
 
-    const env = await upsertEnvironmentForPr(db, {
-      repoId: repo.id,
-      prNumber: LIVE_DEMO_PR_NUMBER,
-      headSha,
-      branch: LIVE_DEMO_BRANCH,
-      ttlMinutes: repo.defaultTtlMinutes,
-      specJson: PLACEHOLDER_SPEC,
-      desiredState: "running",
-      actualState: "pending",
-      errorMessage: null,
-      providerRef: null,
-      publicUrl: null,
-    });
-
-    await updateEnvironmentState(db, env.id, {
-      attemptCount: 0,
-      reconciledSha: null,
-      errorMessage: null,
-      providerRef: null,
-      publicUrl: null,
-      actualState: "pending",
-    });
-
-    await enqueueReconcile(env.id);
+    await enqueueReconcile(outcome.env.id);
     return c.json({
       ok: true,
-      environmentId: env.id,
+      environmentId: outcome.env.id,
       repoFullName: repo.fullName,
       prNumber: LIVE_DEMO_PR_NUMBER,
       headSha,

@@ -1,3 +1,5 @@
+import { requireRepoFullName } from "@ephemera/core";
+
 export const EPHEMERA_COMMENT_MARKER = "<!-- ephemera -->";
 
 export type GitHubClientOptions = {
@@ -27,13 +29,14 @@ export async function fetchBranchHeadSha(
   branch: string,
   options: GitHubClientOptions = {},
 ): Promise<string> {
+  const { owner, name, fullName } = requireRepoFullName(repo);
   const token = getToken(options.token);
   const baseUrl = (options.baseUrl ?? "https://api.github.com").replace(
     /\/$/,
     "",
   );
   const fetchImpl = options.fetchImpl ?? fetch;
-  const url = `${baseUrl}/repos/${repo}/commits/${encodeURIComponent(branch)}`;
+  const url = `${baseUrl}/repos/${owner}/${name}/commits/${encodeURIComponent(branch)}`;
   const res = await fetchImpl(url, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -45,7 +48,7 @@ export async function fetchBranchHeadSha(
 
   if (!res.ok) {
     throw new Error(
-      `GitHub resolve ${repo}@${branch} failed: HTTP ${res.status} ${await res.text()}`,
+      `GitHub resolve ${fullName}@${branch} failed: HTTP ${res.status} ${await res.text()}`,
     );
   }
 
@@ -53,7 +56,7 @@ export async function fetchBranchHeadSha(
   const sha = body.sha?.trim() ?? "";
   if (!/^[0-9a-f]{40}$/i.test(sha)) {
     throw new Error(
-      `GitHub resolve ${repo}@${branch} returned an unexpected sha: ${JSON.stringify(body.sha)}`,
+      `GitHub resolve ${fullName}@${branch} returned an unexpected sha: ${JSON.stringify(body.sha)}`,
     );
   }
   return sha.toLowerCase();
@@ -70,6 +73,7 @@ export async function upsertPrComment(
   body: string,
   options: GitHubClientOptions = {},
 ): Promise<{ id: number; created: boolean }> {
+  const { owner, name } = requireRepoFullName(repo);
   const token = getToken(options.token);
   const baseUrl = (options.baseUrl ?? "https://api.github.com").replace(/\/$/, "");
   const fetchImpl = options.fetchImpl ?? fetch;
@@ -77,7 +81,7 @@ export async function upsertPrComment(
     ? body
     : `${EPHEMERA_COMMENT_MARKER}\n${body}`;
 
-  const listUrl = `${baseUrl}/repos/${repo}/issues/${prNumber}/comments?per_page=100`;
+  const listUrl = `${baseUrl}/repos/${owner}/${name}/issues/${prNumber}/comments?per_page=100`;
   const listRes = await fetchImpl(listUrl, {
     headers: {
       Accept: "application/vnd.github+json",
@@ -100,7 +104,7 @@ export async function upsertPrComment(
 
   if (existing) {
     const patchRes = await fetchImpl(
-      `${baseUrl}/repos/${repo}/issues/comments/${existing.id}`,
+      `${baseUrl}/repos/${owner}/${name}/issues/comments/${existing.id}`,
       {
         method: "PATCH",
         headers: {
@@ -122,7 +126,7 @@ export async function upsertPrComment(
   }
 
   const createRes = await fetchImpl(
-    `${baseUrl}/repos/${repo}/issues/${prNumber}/comments`,
+    `${baseUrl}/repos/${owner}/${name}/issues/${prNumber}/comments`,
     {
       method: "POST",
       headers: {

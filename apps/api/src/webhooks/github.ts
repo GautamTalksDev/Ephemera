@@ -1,10 +1,18 @@
+import {
+  getAllowedRepoOwnersFromEnv,
+  InvalidRepoFullNameError,
+  RepoOwnerNotAllowedError,
+  requireRepoFullName,
+} from "@ephemera/core";
 import type { Context } from "hono";
 import type { Db } from "../db/client.js";
 import {
   countActiveEnvironments,
   ensureRepo,
   getEnvironmentByRepoAndPr,
+  occupiesConcurrencySlot,
   upsertEnvironmentForPr,
+  withEnvironmentConcurrencyLock,
 } from "../db/env-helpers.js";
 import { appendEvent } from "../db/repo.js";
 import { verifyGitHubSignature } from "./verify.js";
@@ -107,12 +115,12 @@ export async function handleGitHubWebhook(
   }
 
   const action = payload.action;
-  const fullName = payload.repository?.full_name;
+  const fullNameRaw = payload.repository?.full_name;
   const prNumber = payload.pull_request?.number ?? payload.number;
   const headSha = payload.pull_request?.head?.sha;
   const branch = payload.pull_request?.head?.ref;
 
-  if (!fullName || !prNumber || !headSha || !branch || !action) {
+  if (!fullNameRaw || !prNumber || !headSha || !branch || !action) {
     return c.json({ ok: true, ignored: true, reason: "incomplete payload" }, 200);
   }
 
@@ -123,6 +131,21 @@ export async function handleGitHubWebhook(
     action !== "closed"
   ) {
     return c.json({ ok: true, ignored: true, action }, 200);
+  }
+
+  let fullName: string;
+  try {
+    fullName = requireRepoFullName(fullNameRaw, {
+      allowedOwners: getAllowedRepoOwnersFromEnv(),
+    }).fullName;
+  } catch (err) {
+    if (err instanceof InvalidRepoFullNameError) {
+      return c.json({ ok: false, error: err.message }, 400);
+    }
+    if (err instanceof RepoOwnerNotAllowedError) {
+      return c.json({ ok: false, error: err.message }, 403);
+    }
+    throw err;
   }
 
   const repo = await ensureRepo(deps.db, {
@@ -162,72 +185,89 @@ export async function handleGitHubWebhook(
     });
   }
 
-  // opened | reopened | synchronize
+  // opened | reopened | synchronize — lock → count → upsert in one transaction
+  // so two simultaneous creates cannot both pass MAX_CONCURRENT_ENVS.
   const max = deps.getMaxConcurrentEnvs();
 
-  if (!existing) {
-    const active = await countActiveEnvironments(deps.db);
-    if (active >= max) {
-      const env = await upsertEnvironmentForPr(deps.db, {
-        repoId: repo.id,
-        prNumber,
-        headSha,
-        branch,
-        ttlMinutes: repo.defaultTtlMinutes,
-        specJson: PLACEHOLDER_SPEC,
-        desiredState: "running",
-        actualState: "failed",
-        errorMessage: `MAX_CONCURRENT_ENVS exceeded (${active}/${max}); environment not queued`,
-      });
+  const outcome = await withEnvironmentConcurrencyLock(deps.db, async (tx) => {
+    const current = await getEnvironmentByRepoAndPr(tx, repo.id, prNumber);
+    const alreadyInSlot = Boolean(
+      current && occupiesConcurrencySlot(current),
+    );
 
-      logWebhookEvent(
-        deps,
-        env.id,
-        env.errorMessage ?? "concurrency limit exceeded",
-        "error",
-      );
-
-      return c.json({
-        ok: true,
-        environmentId: env.id,
-        desiredState: env.desiredState,
-        actualState: env.actualState,
-        queued: false,
-        error: env.errorMessage,
-      });
+    if (!alreadyInSlot) {
+      const active = await countActiveEnvironments(tx, current?.id);
+      if (active >= max) {
+        const env = await upsertEnvironmentForPr(tx, {
+          repoId: repo.id,
+          prNumber,
+          headSha,
+          branch,
+          ttlMinutes: repo.defaultTtlMinutes,
+          specJson: current?.specJson ?? PLACEHOLDER_SPEC,
+          desiredState: "running",
+          actualState: "failed",
+          errorMessage: `MAX_CONCURRENT_ENVS exceeded (${active}/${max}); environment not queued`,
+        });
+        return {
+          kind: "limit" as const,
+          env,
+          active,
+          max,
+        };
+      }
     }
-  }
 
-  const nextActual =
-    !existing ||
-    existing.actualState === "destroyed" ||
-    existing.desiredState === "destroyed"
-      ? ("pending" as const)
-      : undefined;
+    const nextActual =
+      !current ||
+      current.actualState === "destroyed" ||
+      current.desiredState === "destroyed"
+        ? ("pending" as const)
+        : undefined;
 
-  const env = await upsertEnvironmentForPr(deps.db, {
-    repoId: repo.id,
-    prNumber,
-    headSha,
-    branch,
-    ttlMinutes: repo.defaultTtlMinutes,
-    specJson: existing?.specJson ?? PLACEHOLDER_SPEC,
-    desiredState: "running",
-    ...(nextActual ? { actualState: nextActual } : {}),
-    errorMessage: null,
+    const env = await upsertEnvironmentForPr(tx, {
+      repoId: repo.id,
+      prNumber,
+      headSha,
+      branch,
+      ttlMinutes: repo.defaultTtlMinutes,
+      specJson: current?.specJson ?? PLACEHOLDER_SPEC,
+      desiredState: "running",
+      ...(nextActual ? { actualState: nextActual } : {}),
+      errorMessage: null,
+    });
+
+    return { kind: "ok" as const, env };
   });
+
+  if (outcome.kind === "limit") {
+    logWebhookEvent(
+      deps,
+      outcome.env.id,
+      outcome.env.errorMessage ?? "concurrency limit exceeded",
+      "error",
+    );
+    return c.json({
+      ok: true,
+      environmentId: outcome.env.id,
+      desiredState: outcome.env.desiredState,
+      actualState: outcome.env.actualState,
+      queued: false,
+      error: outcome.env.errorMessage,
+    });
+  }
 
   logWebhookEvent(
     deps,
-    env.id,
+    outcome.env.id,
     `pull_request.${action}: desiredState=running headSha=${headSha}`,
   );
-  await deps.enqueueReconcile(env.id);
+  await deps.enqueueReconcile(outcome.env.id);
 
   return c.json({
     ok: true,
-    environmentId: env.id,
-    desiredState: env.desiredState,
+    environmentId: outcome.env.id,
+    desiredState: outcome.env.desiredState,
     queued: true,
   });
 }

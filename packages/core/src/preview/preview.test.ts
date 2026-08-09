@@ -211,6 +211,39 @@ services:
     expect(result.errors.some((e) => /start/i.test(e))).toBe(true);
     expect(result.errors.some((e) => /\(line \d+\)/.test(e))).toBe(true);
   });
+
+  it.each([
+    ["semicolon", "api;rm"],
+    ["command substitution", "api$(curl)"],
+    ["backticks", "api`id`"],
+    ["spaces", "api web"],
+    ["unicode", "ápí"],
+    ["hyphen", "my-api"],
+  ])("rejects service names containing %s at parse time", (_label, badName) => {
+    const yaml = `
+version: 1
+services:
+  - name: ${JSON.stringify(badName)}
+    type: runtime
+    runtime: nodejs@22
+    build:
+      commands: [npm ci]
+    start: node server.js
+    port: 3000
+    public: true
+`;
+    const result = parsePreviewSpec(yaml);
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      return;
+    }
+    expect(result.errors.some((e) => e.includes("services[0].name"))).toBe(
+      true,
+    );
+    expect(
+      result.errors.some((e) => /must match \^\[a-z\]\[a-z0-9\]\{0,20\}\$/.test(e)),
+    ).toBe(true);
+  });
 });
 
 describe("validateSpec", () => {

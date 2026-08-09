@@ -3,7 +3,9 @@ export {
   countActiveEnvironments,
   ensureRepo,
   getEnvironmentByRepoAndPr,
+  occupiesConcurrencySlot,
   upsertEnvironmentForPr,
+  withEnvironmentConcurrencyLock,
 } from "./env-helpers.js";
 export {
   appendEvent,
@@ -14,6 +16,7 @@ export {
   eventInput,
   getEnvironmentById,
   getRepoById,
+  getRepoByIdWithToken,
   getRepoByFullName,
   listEnvironmentsByRepo,
   listEventsForEnvironment,
@@ -24,6 +27,8 @@ export {
   listRepos,
   updateEnvironmentState,
   type EnvironmentClaim,
+  type RepoPublic,
+  type RepoWithToken,
 } from "./repo.js";
 export {
   actualStateEnum,

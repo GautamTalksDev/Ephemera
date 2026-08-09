@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./environment": {
+      "types": "./src/environment/waiting-on.ts",
+      "default": "./src/environment/waiting-on.ts"
     }
   },
   "scripts": {

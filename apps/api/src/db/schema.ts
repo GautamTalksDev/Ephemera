@@ -81,6 +81,11 @@ export const environments = pgTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     /** headSha last acted on / failed on — used to detect new pushes while failed. */
     reconciledSha: text("reconciled_sha"),
+    /**
+     * Synthetic "Run live demo" environment (no real GitHub PR).
+     * Skip upsertPrComment — there is no PR issue to comment on.
+     */
+    isDemo: boolean("is_demo").notNull().default(false),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

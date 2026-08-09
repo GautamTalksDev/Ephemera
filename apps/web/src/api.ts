@@ -35,12 +35,39 @@ const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined)?.replace(
   "",
 ) ?? "";
 
+/** In-memory only — never persisted (localStorage unsupported here). */
+let adminToken = "";
+
+export function setAdminToken(token: string): void {
+  adminToken = token.trim();
+}
+
+export function getAdminToken(): string {
+  return adminToken;
+}
+
 function apiUrl(path: string): string {
   if (API_BASE) {
     // Production: talk to api host directly (paths have no /api prefix).
     return `${API_BASE}${path}`;
   }
   return `/api${path}`;
+}
+
+function authHeaders(extra?: HeadersInit): Headers {
+  const headers = new Headers(extra);
+  if (adminToken) {
+    headers.set("Authorization", `Bearer ${adminToken}`);
+  }
+  return headers;
+}
+
+async function mutate(
+  path: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const headers = authHeaders(init.headers);
+  return fetch(apiUrl(path), { ...init, headers });
 }
 
 async function json<T>(res: Response): Promise<T> {
@@ -67,12 +94,32 @@ export async function fetchEnvironmentDetail(id: string): Promise<{
 
 export async function destroyEnvironment(id: string): Promise<void> {
   await json(
-    await fetch(apiUrl(`/environments/${id}/destroy`), { method: "POST" }),
+    await mutate(`/environments/${id}/destroy`, { method: "POST" }),
   );
 }
 
+export async function retryEnvironment(id: string): Promise<void> {
+  await json(await mutate(`/environments/${id}/retry`, { method: "POST" }));
+}
+
+export async function extendEnvironmentTtl(
+  id: string,
+  minutes?: number,
+): Promise<EnvironmentItem> {
+  const data = await json<{ environment: EnvironmentItem }>(
+    await mutate(`/environments/${id}/ttl`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(
+        minutes !== undefined ? { minutes } : {},
+      ),
+    }),
+  );
+  return data.environment;
+}
+
 export async function runLiveDemo(): Promise<{ environmentId: string }> {
-  return json(await fetch(apiUrl("/demo/run"), { method: "POST" }));
+  return json(await mutate("/demo/run", { method: "POST" }));
 }
 
 export async function importComposeYaml(compose: string): Promise<{
@@ -80,7 +127,7 @@ export async function importComposeYaml(compose: string): Promise<{
   warnings: string[];
 }> {
   return json(
-    await fetch(apiUrl("/import/compose"), {
+    await mutate("/import/compose", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ compose }),

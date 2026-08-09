@@ -1,3 +1,4 @@
+import { requireRepoFullName } from "@ephemera/core";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -18,7 +19,8 @@ export const fetchPreviewYmlFromGitHub: FetchPreviewYml = async ({
   headSha,
   token,
 }) => {
-  const url = `https://api.github.com/repos/${repoFullName}/contents/${path}?ref=${encodeURIComponent(headSha)}`;
+  const { owner, name, fullName } = requireRepoFullName(repoFullName);
+  const url = `https://api.github.com/repos/${owner}/${name}/contents/${path}?ref=${encodeURIComponent(headSha)}`;
   const res = await fetch(url, {
     headers: {
       Accept: "application/vnd.github.raw",
@@ -29,7 +31,7 @@ export const fetchPreviewYmlFromGitHub: FetchPreviewYml = async ({
   });
   if (!res.ok) {
     throw new Error(
-      `failed to fetch ${path}@${headSha} from ${repoFullName}: HTTP ${res.status}`,
+      `failed to fetch ${path}@${headSha} from ${fullName}: HTTP ${res.status}`,
     );
   }
   return res.text();

@@ -3,7 +3,8 @@
 #
 # After import + first push, set these secrets in the Zerops GUI (or REST user-data).
 # NOTE: Zerops forbids custom env keys prefixed with ZEROPS_ on its own platform.
-#   api:    GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN
+#   api:    EPHEMERA_ADMIN_TOKEN, GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN,
+#           EPHEMERA_ALLOWED_REPO_OWNERS (optional owner allowlist)
 #   worker: GITHUB_TOKEN,
 #           EPHEMERA_PREVIEW_TOKEN=<token>,
 #           EPHEMERA_PREVIEW_PROJECT_ID=<LIGHT ephemera-envs project id>
@@ -25,6 +26,8 @@ zerops:
         - pnpm install --frozen-lockfile
         # Emit apps/api/dist so init/start use plain node (no workspace-local tsx).
         - pnpm --filter @ephemera/api build
+        # Bake commit for GET /health → gitSha (proof of which revision is live).
+        - bash -c 'git rev-parse HEAD > apps/api/GIT_SHA 2>/dev/null || echo unknown > apps/api/GIT_SHA'
       deployFiles:
         - ./package.json
         - ./pnpm-workspace.yaml
@@ -53,7 +56,8 @@ zerops:
         PREVIEW_TTL_MINUTES: "720"
       # Migrate at start (not initCommands) so DATABASE_URL from run.envVariables
       # is available. Idempotent + advisory-locked for multi-container boots.
-      start: bash -c "node apps/api/dist/db/migrate.js && node --import tsx apps/api/src/index.ts"
+      # GIT_SHA from build-time apps/api/GIT_SHA feeds /health → web corner badge.
+      start: bash -c 'export GIT_SHA="$(cat apps/api/GIT_SHA 2>/dev/null || true)"; node apps/api/dist/db/migrate.js && node --import tsx apps/api/src/index.ts'
       healthCheck:
         httpGet:
           port: 3000
@@ -110,7 +114,8 @@ zerops:
         VITE_API_BASE: https://api-${zeropsSubdomainHost}-3000.prg1.zerops.app
       buildCommands:
         - pnpm install --frozen-lockfile
-        - pnpm --filter @ephemera/web build
+        # Bake commit into the static bundle (corner SHA badge).
+        - bash -c 'export VITE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null || echo unknown); pnpm --filter @ephemera/web build'
       # ~/ = deploy directory *contents* to runtime /var/www (not a nested folder).
       deployFiles:
         - apps/web/dist/~/

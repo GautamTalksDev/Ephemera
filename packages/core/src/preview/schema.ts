@@ -5,6 +5,12 @@ export const ALLOWED_RUNTIMES = ["nodejs@22"] as const;
 export const ALLOWED_ENGINES = ["postgresql@16"] as const;
 export const MAX_SERVICES = 6;
 
+/**
+ * Service names are used in Zerops hostnames and shell-adjacent tooling.
+ * Reject anything that would need sanitising — a bad name is a malformed spec.
+ */
+export const SERVICE_NAME_RE = /^[a-z][a-z0-9]{0,20}$/;
+
 const EnvSchema = z.record(z.string(), z.string());
 
 const BuildSchema = z.object({
@@ -12,13 +18,10 @@ const BuildSchema = z.object({
 });
 
 const ServiceBaseSchema = z.object({
-  name: z
-    .string()
-    .min(1)
-    .regex(
-      /^[a-z][a-z0-9-]*$/,
-      "must be lowercase alphanumeric with hyphens, starting with a letter",
-    ),
+  name: z.string().regex(
+    SERVICE_NAME_RE,
+    "must match ^[a-z][a-z0-9]{0,20}$ (lowercase letter then up to 20 alphanumeric; no hyphens, spaces, or punctuation)",
+  ),
   public: z.boolean().default(false),
   env: EnvSchema.default(() => ({})),
 });
@@ -84,7 +87,7 @@ export type ParsePreviewSpecResult =
   | { ok: true; spec: PreviewSpec }
   | { ok: false; errors: string[] };
 
-export const ENV_REF_RE = /\$\{([a-z][a-z0-9-]*)\.([A-Z_][A-Z0-9_]*)\}/g;
+export const ENV_REF_RE = /\$\{([a-z][a-z0-9]{0,20})\.([A-Z_][A-Z0-9_]*)\}/g;
 
 export function defaultTtlMinutes(): number {
   const raw = process.env.PREVIEW_TTL_MINUTES;

@@ -5,6 +5,8 @@ export const VERSION = "0.1.0";
 export const HealthResponseSchema = z.object({
   ok: z.literal(true),
   version: z.string(),
+  /** Deployed commit SHA when GIT_SHA is set at runtime. */
+  gitSha: z.string().optional(),
 });
 
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
@@ -20,6 +22,7 @@ export {
   PREVIEW_SPEC_VERSION,
   PreviewSpecSchema,
   RuntimeServiceSchema,
+  SERVICE_NAME_RE,
   ServiceSchema,
   StaticServiceSchema,
   defaultTtlMinutes,
@@ -48,6 +51,7 @@ export {
   getProvider,
   isDatabaseStack,
   listMockProviderRefs,
+  probePublicUrl,
   providerRefForPr,
   redactGitSecrets,
   resetMockProviderState,
@@ -68,3 +72,23 @@ export {
 } from "./provider/index.js";
 
 export { importCompose, type ComposeImportResult } from "./compose/index.js";
+
+export {
+  deriveWaitingOn,
+  type WaitingOnInput,
+} from "./environment/waiting-on.js";
+
+export {
+  REPO_FULL_NAME_RE,
+  githubHttpsCloneUrl,
+  githubHttpsCloneUrlFromFullName,
+  getAllowedRepoOwnersFromEnv,
+  isRepoOwnerAllowed,
+  InvalidRepoFullNameError,
+  parseAllowedRepoOwners,
+  parseRepoFullName,
+  RepoOwnerNotAllowedError,
+  requireRepoFullName,
+  type ParsedRepoFullName,
+  type RequireRepoFullNameOptions,
+} from "./github/index.js";

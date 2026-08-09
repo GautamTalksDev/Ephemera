@@ -7,6 +7,7 @@ export {
   PREVIEW_SPEC_VERSION,
   PreviewSpecSchema,
   RuntimeServiceSchema,
+  SERVICE_NAME_RE,
   ServiceSchema,
   StaticServiceSchema,
   defaultTtlMinutes,

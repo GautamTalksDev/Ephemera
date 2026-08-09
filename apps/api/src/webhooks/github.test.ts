@@ -204,6 +204,48 @@ describe("POST /webhooks/github", () => {
     expect(enqueueReconcile).not.toHaveBeenCalled();
   });
 
+  it("rejects invalid repository.full_name with 400", async () => {
+    const raw = `{
+  "action": "opened",
+  "number": 1,
+  "pull_request": {
+    "number": 1,
+    "head": { "sha": "${"a".repeat(40)}", "ref": "feat" }
+  },
+  "repository": { "full_name": "https://github.com/evil/app.git" }
+}
+`;
+    const res = await postRaw(raw);
+    expect(res.status).toBe(400);
+    expect(enqueueReconcile).not.toHaveBeenCalled();
+  });
+
+  it("rejects repos outside EPHEMERA_ALLOWED_REPO_OWNERS with 403", async () => {
+    const prev = process.env.EPHEMERA_ALLOWED_REPO_OWNERS;
+    process.env.EPHEMERA_ALLOWED_REPO_OWNERS = "acme-only";
+    try {
+      const raw = `{
+  "action": "opened",
+  "number": 2,
+  "pull_request": {
+    "number": 2,
+    "head": { "sha": "${"b".repeat(40)}", "ref": "feat" }
+  },
+  "repository": { "full_name": "ephemera-demo/blocked" }
+}
+`;
+      const res = await postRaw(raw);
+      expect(res.status).toBe(403);
+      expect(enqueueReconcile).not.toHaveBeenCalled();
+    } finally {
+      if (prev === undefined) {
+        delete process.env.EPHEMERA_ALLOWED_REPO_OWNERS;
+      } else {
+        process.env.EPHEMERA_ALLOWED_REPO_OWNERS = prev;
+      }
+    }
+  });
+
   it("marks failed and does not enqueue when MAX_CONCURRENT_ENVS exceeded", async () => {
     for (let i = 1; i <= 3; i++) {
       const raw = `{

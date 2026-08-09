@@ -1,11 +1,15 @@
-import { and, count, eq, inArray, ne } from "drizzle-orm";
+import {
+  getAllowedRepoOwnersFromEnv,
+  requireRepoFullName,
+} from "@ephemera/core";
+import { and, count, eq, inArray, ne, sql } from "drizzle-orm";
 import type { Db } from "./client.js";
+import { repoPublicColumns, type RepoPublic } from "./repo.js";
 import {
   environments,
   repos,
   type Environment,
   type NewEnvironment,
-  type Repo,
 } from "./schema.js";
 
 const ACTIVE_ACTUAL_STATES = [
@@ -15,6 +19,34 @@ const ACTIVE_ACTUAL_STATES = [
   "ready",
   "destroying",
 ] as const;
+
+/** Advisory lock key for MAX_CONCURRENT_ENVS (transaction-scoped). */
+const ENV_CONCURRENCY_LOCK_KEY = 0x45_50_48_45; // "EPHE"
+
+export function occupiesConcurrencySlot(
+  env: Pick<Environment, "desiredState" | "actualState">,
+): boolean {
+  return (
+    env.desiredState === "running" &&
+    (ACTIVE_ACTUAL_STATES as readonly string[]).includes(env.actualState)
+  );
+}
+
+/**
+ * Serialize concurrency-slot decisions: lock → count → mutate in one transaction
+ * so two simultaneous creates cannot both pass the limit check.
+ */
+export async function withEnvironmentConcurrencyLock<T>(
+  db: Db,
+  fn: (tx: Db) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${ENV_CONCURRENCY_LOCK_KEY})`,
+    );
+    return fn(tx as unknown as Db);
+  });
+}
 
 export async function getEnvironmentByRepoAndPr(
   db: Db,
@@ -66,6 +98,7 @@ export async function upsertEnvironmentForPr(
     errorMessage?: string | null;
     providerRef?: string | null;
     publicUrl?: string | null;
+    isDemo?: boolean;
   },
 ): Promise<Environment> {
   const expiresAt = new Date(Date.now() + input.ttlMinutes * 60_000);
@@ -82,6 +115,7 @@ export async function upsertEnvironmentForPr(
     publicUrl: input.publicUrl ?? null,
     specJson: input.specJson,
     expiresAt,
+    isDemo: input.isDemo ?? false,
   };
 
   const [row] = await db
@@ -106,6 +140,7 @@ export async function upsertEnvironmentForPr(
         ...(input.publicUrl !== undefined
           ? { publicUrl: input.publicUrl }
           : {}),
+        ...(input.isDemo !== undefined ? { isDemo: input.isDemo } : {}),
         updatedAt: new Date(),
       },
     })
@@ -124,11 +159,15 @@ export async function ensureRepo(
     installationToken: string;
     defaultTtlMinutes: number;
   },
-): Promise<Repo> {
+): Promise<RepoPublic> {
+  const { fullName } = requireRepoFullName(input.fullName, {
+    allowedOwners: getAllowedRepoOwnersFromEnv(),
+  });
+
   const [existing] = await db
-    .select()
+    .select(repoPublicColumns)
     .from(repos)
-    .where(eq(repos.fullName, input.fullName))
+    .where(eq(repos.fullName, fullName))
     .limit(1);
   if (existing) {
     const [updated] = await db
@@ -138,27 +177,27 @@ export async function ensureRepo(
         defaultTtlMinutes: input.defaultTtlMinutes,
       })
       .where(eq(repos.id, existing.id))
-      .returning();
+      .returning(repoPublicColumns);
     return updated ?? existing;
   }
 
   const [created] = await db
     .insert(repos)
     .values({
-      fullName: input.fullName,
+      fullName,
       installationToken: input.installationToken,
       defaultTtlMinutes: input.defaultTtlMinutes,
     })
     .onConflictDoNothing()
-    .returning();
+    .returning(repoPublicColumns);
   if (created) {
     return created;
   }
 
   const [again] = await db
-    .select()
+    .select(repoPublicColumns)
     .from(repos)
-    .where(eq(repos.fullName, input.fullName))
+    .where(eq(repos.fullName, fullName))
     .limit(1);
   if (!again) {
     throw new Error("failed to create repo");

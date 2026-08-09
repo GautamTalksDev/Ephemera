@@ -1,3 +1,7 @@
+import {
+  getAllowedRepoOwnersFromEnv,
+  requireRepoFullName,
+} from "@ephemera/core";
 import { asc, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "./client.js";
 import {
@@ -18,6 +22,26 @@ import {
 
 export type EnvironmentClaim = Environment;
 
+/** Safe to return from list/detail APIs — never includes installationToken. */
+export const repoPublicColumns = {
+  id: repos.id,
+  fullName: repos.fullName,
+  previewYmlPath: repos.previewYmlPath,
+  defaultTtlMinutes: repos.defaultTtlMinutes,
+  createdAt: repos.createdAt,
+} as const;
+
+export type RepoPublic = {
+  id: string;
+  fullName: string;
+  previewYmlPath: string;
+  defaultTtlMinutes: number;
+  createdAt: Date;
+};
+
+/** Internal-only: includes the GitHub installation token. */
+export type RepoWithToken = RepoPublic & { installationToken: string };
+
 function claimLockHoldMs(): number {
   const raw = process.env.CLAIM_LOCK_HOLD_MS;
   if (!raw) {
@@ -28,7 +52,13 @@ function claimLockHoldMs(): number {
 }
 
 export async function createRepo(db: Db, input: NewRepo): Promise<Repo> {
-  const [row] = await db.insert(repos).values(input).returning();
+  const { fullName } = requireRepoFullName(input.fullName, {
+    allowedOwners: getAllowedRepoOwnersFromEnv(),
+  });
+  const [row] = await db
+    .insert(repos)
+    .values({ ...input, fullName })
+    .returning();
   if (!row) {
     throw new Error("failed to create repo");
   }
@@ -38,17 +68,20 @@ export async function createRepo(db: Db, input: NewRepo): Promise<Repo> {
 export async function getRepoByFullName(
   db: Db,
   fullName: string,
-): Promise<Repo | undefined> {
+): Promise<RepoPublic | undefined> {
   const [row] = await db
-    .select()
+    .select(repoPublicColumns)
     .from(repos)
     .where(eq(repos.fullName, fullName))
     .limit(1);
   return row;
 }
 
-export async function listRepos(db: Db): Promise<Repo[]> {
-  return db.select().from(repos).orderBy(asc(repos.createdAt));
+export async function listRepos(db: Db): Promise<RepoPublic[]> {
+  return db
+    .select(repoPublicColumns)
+    .from(repos)
+    .orderBy(asc(repos.createdAt));
 }
 
 export async function createEnvironment(
@@ -101,6 +134,7 @@ export async function updateEnvironmentState(
     reconciledSha?: string | null;
     specJson?: Record<string, unknown>;
     actualStateEnteredAt?: Date;
+    expiresAt?: Date;
   },
 ): Promise<Environment | undefined> {
   const now = new Date();
@@ -229,8 +263,28 @@ export async function listKnownProviderRefs(db: Db): Promise<string[]> {
 export async function getRepoById(
   db: Db,
   id: string,
-): Promise<Repo | undefined> {
-  const [row] = await db.select().from(repos).where(eq(repos.id, id)).limit(1);
+): Promise<RepoPublic | undefined> {
+  const [row] = await db
+    .select(repoPublicColumns)
+    .from(repos)
+    .where(eq(repos.id, id))
+    .limit(1);
+  return row;
+}
+
+/** Load a repo including installationToken — reconciler / GitHub API only. */
+export async function getRepoByIdWithToken(
+  db: Db,
+  id: string,
+): Promise<RepoWithToken | undefined> {
+  const [row] = await db
+    .select({
+      ...repoPublicColumns,
+      installationToken: repos.installationToken,
+    })
+    .from(repos)
+    .where(eq(repos.id, id))
+    .limit(1);
   return row;
 }
 

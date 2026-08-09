@@ -18,7 +18,6 @@ export type ReconcileDeps = {
   /** When false, skip GitHub comment updates (tests/offline). */
   postComments?: boolean;
   maxAttempts?: number;
-  githubRepoUrl?: (fullName: string) => string;
   /** Max time in provisioning poll before marking failed (default 5 min). */
   provisionDeadlineMs?: number;
   /** Max time in deploying step before marking failed (default 10 min). */
@@ -46,3 +45,16 @@ export const DEPLOY_DEADLINE_MS = 10 * 60_000;
 export const PROVISION_EMPTY_GRACE_MS = 180_000;
 /** Ready envs tolerate transient HTTP failures this long before failed. */
 export const READY_HEALTH_FAIL_MS = 5 * 60_000;
+
+/** Repo TTL, falling back to PREVIEW_TTL_MINUTES (default 60). */
+export function resolvePreviewTtlMinutes(repoDefaultTtlMinutes: number): number {
+  if (Number.isFinite(repoDefaultTtlMinutes) && repoDefaultTtlMinutes > 0) {
+    return Math.trunc(repoDefaultTtlMinutes);
+  }
+  const raw = process.env.PREVIEW_TTL_MINUTES;
+  if (!raw) {
+    return 60;
+  }
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 60;
+}

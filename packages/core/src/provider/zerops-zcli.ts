@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 
 /** Default for login / misc zcli calls. */
 export const ZCLI_TIMEOUT_MS = 120_000;
@@ -26,7 +26,7 @@ export function timeoutForZcliArgs(args: readonly string[]): number {
 }
 
 /**
- * Run `zcli` with a hard timeout; capture stdout+stderr into any error.
+ * Run `zcli` via execFile with an argument array (never a shell string / exec).
  * service-import: 300s; push: 420s; delete/other: 120s.
  */
 export async function runZcli(
@@ -38,64 +38,60 @@ export async function runZcli(
   } = {},
 ): Promise<ZcliResult> {
   const timeoutMs = options.timeoutMs ?? timeoutForZcliArgs(args);
+  // Copy into a mutable string[] — execFile must never receive a shell string.
+  const argv = [...args];
 
   return new Promise((resolve, reject) => {
-    const child = spawn("zcli", args, {
-      cwd: options.cwd,
-      env: { ...process.env, ...options.env },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    execFile(
+      "zcli",
+      argv,
+      {
+        cwd: options.cwd,
+        env: { ...process.env, ...options.env },
+        timeout: timeoutMs,
+        maxBuffer: 16 * 1024 * 1024,
+        // shell defaults to false for execFile — do not set shell: true.
+      },
+      (err, stdout, stderr) => {
+        const out = String(stdout ?? "");
+        const errOut = String(stderr ?? "");
+        if (!err) {
+          resolve({ stdout: out, stderr: errOut });
+          return;
+        }
 
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
+        const e = err as NodeJS.ErrnoException & {
+          killed?: boolean;
+          signal?: NodeJS.Signals | null;
+          code?: string | number | null;
+        };
 
-    const finish = (err: Error | undefined, result?: ZcliResult) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      if (err) {
-        reject(err);
-        return;
-      }
-      resolve(result!);
-    };
+        if (e.killed || e.signal === "SIGTERM" || e.signal === "SIGKILL") {
+          reject(
+            new Error(
+              `zcli ${argv.join(" ")} timed out after ${timeoutMs}ms\nstdout:\n${out}\nstderr:\n${errOut}`,
+            ),
+          );
+          return;
+        }
 
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(
-        new Error(
-          `zcli ${args.join(" ")} timed out after ${timeoutMs}ms\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-        ),
-      );
-    }, timeoutMs);
+        if (typeof e.code === "string") {
+          // spawn/execFile start failures (ENOENT, EACCES, …)
+          reject(
+            new Error(
+              `zcli ${argv.join(" ")} failed to start: ${e.message}\nstdout:\n${out}\nstderr:\n${errOut}`,
+            ),
+          );
+          return;
+        }
 
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (err) => {
-      finish(
-        new Error(
-          `zcli ${args.join(" ")} failed to start: ${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-        ),
-      );
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        finish(undefined, { stdout, stderr });
-        return;
-      }
-      finish(
-        new Error(
-          `zcli ${args.join(" ")} exited ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-        ),
-      );
-    });
+        reject(
+          new Error(
+            `zcli ${argv.join(" ")} exited ${e.code}\nstdout:\n${out}\nstderr:\n${errOut}`,
+          ),
+        );
+      },
+    );
   });
 }
 

@@ -27,7 +27,8 @@
     "drizzle-orm": "^0.44.5",
     "hono": "^4.9.6",
     "ioredis": "^5.7.0",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^22.17.2",

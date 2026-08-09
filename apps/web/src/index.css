@@ -88,7 +88,38 @@ textarea {
 .top-actions {
   margin-left: auto;
   display: flex;
+  align-items: center;
   gap: 10px;
+}
+
+.admin-token-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.admin-token-input {
+  width: 180px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text);
+  padding: 6px 8px;
+  border-radius: 2px;
+}
+
+.admin-token-input:focus {
+  outline: 1px solid #2a6b5e;
+  border-color: #2a6b5e;
+}
+
+.auth-banner {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border: 1px solid #5a4a1f;
+  background: #1a160c;
+  color: #e6d4a0;
+  font-size: 13px;
 }
 
 .btn {
@@ -269,4 +300,17 @@ textarea {
   color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
+}
+
+.commit-sha {
+  position: fixed;
+  right: 12px;
+  bottom: 10px;
+  z-index: 50;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  opacity: 0.85;
+  pointer-events: none;
+  user-select: all;
 }

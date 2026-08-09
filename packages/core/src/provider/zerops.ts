@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { stringify as yamlStringify } from "yaml";
-import { ENV_REF_RE, type PreviewSpec, type Service } from "../preview/schema.js";
+import {
+  ENV_REF_RE,
+  SERVICE_NAME_RE,
+  type PreviewSpec,
+  type Service,
+} from "../preview/schema.js";
 import { isZcliNotFoundError, runZcli, ZCLI_TIMEOUT_MS } from "./zerops-zcli.js";
 import type {
   CreateEnvironmentInput,
@@ -83,13 +88,17 @@ export function providerRefForPr(prNumber: number): string {
 }
 
 /**
- * Service hostnames: `pr{prNumber}{serviceName}` — lowercase alphanumeric only,
- * max 25 chars, deterministic (idempotent create key).
+ * Service hostnames: `pr{prNumber}{serviceName}` — max 25 chars, deterministic.
+ * Service names must already match SERVICE_NAME_RE (no sanitising here).
  */
 export function serviceHostname(prNumber: number, serviceName: string): string {
+  if (!SERVICE_NAME_RE.test(serviceName)) {
+    throw new Error(
+      `service name ${JSON.stringify(serviceName)} must match ${SERVICE_NAME_RE}`,
+    );
+  }
   const prefix = providerRefForPr(prNumber);
-  const rest = serviceName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return `${prefix}${rest}`.slice(0, HOSTNAME_MAX);
+  return `${prefix}${serviceName}`.slice(0, HOSTNAME_MAX);
 }
 
 function prNumberFromProviderRef(providerRef: string): number {
@@ -553,7 +562,7 @@ export function evaluateZeropsStatus(
     return { state: "ready", message: summary() };
   }
 
-  // phase === "deployed" — need public URL when a service exposes subdomain/ports.
+  // phase === "deployed" — publicUrl is required; never report ready without one.
   const subdomainHost = project.zeropsSubdomainHost ?? undefined;
   const publicSvc =
     services.find((s) => s.subdomainAccess) ??
@@ -568,18 +577,18 @@ export function evaluateZeropsStatus(
     publicUrl = publicUrlFor(publicSvc.name, subdomainHost, port);
   }
 
-  if (publicSvc && !publicUrl) {
+  if (!publicUrl) {
     return {
       state: "provisioning",
       message: `${summary()} (waiting for public subdomain)`,
     };
   }
 
-  const result: GetStatusResult = { state: "ready", message: summary() };
-  if (publicUrl !== undefined) {
-    result.publicUrl = publicUrl;
-  }
-  return result;
+  return {
+    state: "ready",
+    message: summary(),
+    publicUrl,
+  };
 }
 
 function publicUrlFor(

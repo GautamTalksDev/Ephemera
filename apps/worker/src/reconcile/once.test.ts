@@ -4,6 +4,7 @@ import {
   createPool,
   createRepo,
   getEnvironmentById,
+  listEventsForEnvironment,
   updateEnvironmentState,
 } from "@ephemera/api/db";
 import {
@@ -113,7 +114,71 @@ describe("reconcileOnce", () => {
     const final = await driveToTerminal(deps, env.id);
     expect(final.actualState).toBe("ready");
     expect(final.publicUrl).toMatch(/^https:\/\//);
+    expect(final.publicUrl).not.toBeNull();
     expect(deps.upsertPrComment).toHaveBeenCalled();
+  });
+
+  it("recomputes expiresAt from repo defaultTtlMinutes when becoming ready", async () => {
+    const { env, repo } = await seedPending(10);
+    // Stale expiresAt at create time (5 minutes); repo TTL bumped to 3 hours.
+    await updateEnvironmentState(db, env.id, {
+      expiresAt: new Date(Date.now() + 5 * 60_000),
+    });
+    await db.execute(
+      sql`UPDATE repos SET default_ttl_minutes = 180 WHERE id = ${repo.id}`,
+    );
+    deps.probePublicUrl = vi.fn(async () => ({ ok: true }));
+    const before = Date.now();
+    const final = await driveToTerminal(deps, env.id);
+    expect(final.actualState).toBe("ready");
+    const remainingMs = final.expiresAt.getTime() - before;
+    expect(remainingMs).toBeGreaterThan(170 * 60_000);
+    expect(remainingMs).toBeLessThan(190 * 60_000);
+  });
+
+  it("never writes ready without a publicUrl", async () => {
+    const { env } = await seedPending(8);
+    // Drive until deploying, then stub getStatus ready with no URL.
+    for (let i = 0; i < 40; i++) {
+      const r = await reconcileOnce(env.id, deps);
+      const row = await getEnvironmentById(db, env.id);
+      if (row?.actualState === "deploying") {
+        break;
+      }
+      if (r.step.includes("wait")) {
+        await new Promise((r) => setTimeout(r, 40));
+      }
+    }
+    const deploying = await getEnvironmentById(db, env.id);
+    expect(deploying?.actualState).toBe("deploying");
+
+    deps.provider = {
+      name: "no-url-stub",
+      async createEnvironment() {
+        return { providerRef: deploying!.providerRef! };
+      },
+      async deployCode() {},
+      async getStatus(): Promise<GetStatusResult> {
+        return { state: "ready" }; // bug: ready without publicUrl
+      },
+      async destroyEnvironment() {},
+    };
+    deps.deployDeadlineMs = 60_000;
+
+    const stuck = await reconcileOnce(env.id, deps);
+    expect(stuck.step).toBe("deploying-wait-url");
+    const after = await getEnvironmentById(db, env.id);
+    expect(after?.actualState).toBe("deploying");
+    expect(after?.publicUrl).toBeNull();
+
+    const events = await listEventsForEnvironment(db, env.id);
+    expect(
+      events.some(
+        (e) =>
+          e.step === "deploy" &&
+          /ready without publicUrl/i.test(e.message),
+      ),
+    ).toBe(true);
   });
 
   it("provisioning failure exceeds time deadline then fails", async () => {
@@ -291,5 +356,46 @@ describe("reconcileOnce", () => {
     expect(row?.actualState).toBe("failed");
     expect(row?.degraded).toBe(false);
     expect(row?.errorMessage).toMatch(/502/);
+  });
+
+  it("ready + empty provider service list detects drift and resets to pending", async () => {
+    const { env } = await seedPending(7);
+    deps.probePublicUrl = vi.fn(async () => ({ ok: true }));
+    await driveToTerminal(deps, env.id);
+    const ready = await getEnvironmentById(db, env.id);
+    expect(ready?.actualState).toBe("ready");
+    expect(ready?.providerRef).toBeTruthy();
+
+    const missingRef = ready!.providerRef!;
+    deps.provider = {
+      name: "drift-stub",
+      async createEnvironment() {
+        return { providerRef: missingRef };
+      },
+      async deployCode() {},
+      async getStatus(): Promise<GetStatusResult> {
+        return {
+          state: "failed",
+          message: `no services found for providerRef "${missingRef}"`,
+        };
+      },
+      async destroyEnvironment() {},
+    };
+
+    const result = await reconcileOnce(env.id, deps);
+    expect(result.step).toBe("ready→pending");
+    const after = await getEnvironmentById(db, env.id);
+    expect(after?.actualState).toBe("pending");
+    expect(after?.providerRef).toBeNull();
+    expect(after?.publicUrl).toBeNull();
+
+    const events = await listEventsForEnvironment(db, env.id);
+    expect(
+      events.some(
+        (e) =>
+          e.step === "drift-detected" &&
+          /no services found for providerRef/i.test(e.message),
+      ),
+    ).toBe(true);
   });
 });

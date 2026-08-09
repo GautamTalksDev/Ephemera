@@ -1,6 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { VERSION, type HealthResponse } from "@ephemera/core";
+import {
+  adminAuthMiddleware,
+  getAdminTokenFromEnv,
+} from "./auth/admin.js";
 import { createDb, createPool, type Db } from "./db/client.js";
 import { enqueueReconcile } from "./queue/reconcile.js";
 import { environmentRoutes } from "./routes/environments.js";
@@ -16,6 +20,8 @@ import {
 export type CreateAppOptions = {
   db?: Db;
   webhookDeps?: Partial<GitHubWebhookDeps>;
+  /** Override for tests — defaults to EPHEMERA_ADMIN_TOKEN. */
+  getAdminToken?: () => string;
 };
 
 function corsOrigin(): string | string[] | undefined {
@@ -48,14 +54,27 @@ export function createApp(options: CreateAppOptions = {}): Hono {
       "*",
       cors({
         origin,
-        allowMethods: ["GET", "POST", "OPTIONS"],
+        allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allowHeaders: ["Content-Type", "Authorization"],
       }),
     );
   }
 
+  app.use(
+    "*",
+    adminAuthMiddleware({
+      getAdminToken: options.getAdminToken ?? getAdminTokenFromEnv,
+      exemptPaths: [githubWebhookPath],
+    }),
+  );
+
   app.get("/health", (c) => {
-    const body: HealthResponse = { ok: true, version: VERSION };
+    const gitSha = process.env.GIT_SHA?.trim() || undefined;
+    const body: HealthResponse = {
+      ok: true,
+      version: VERSION,
+      ...(gitSha ? { gitSha } : {}),
+    };
     return c.json(body);
   });
 

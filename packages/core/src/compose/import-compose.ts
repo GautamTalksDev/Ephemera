@@ -1,5 +1,10 @@
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
-import { parsePreviewSpec, type PreviewSpec, type Service } from "../preview/index.js";
+import {
+  parsePreviewSpec,
+  SERVICE_NAME_RE,
+  type PreviewSpec,
+  type Service,
+} from "../preview/index.js";
 
 export type ComposeImportResult = {
   previewYml: string;
@@ -129,20 +134,10 @@ function envFromCompose(
   return out;
 }
 
-function sanitizeName(name: string): string {
-  const cleaned = name
-    .toLowerCase()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (!cleaned || !/^[a-z]/.test(cleaned)) {
-    return `svc-${cleaned || "x"}`.replace(/[^a-z0-9-]/g, "");
-  }
-  return cleaned.slice(0, 48);
-}
-
 /**
  * Draft a preview.yml from docker-compose YAML.
  * Never silently invent unsupported behavior — emit warnings instead.
+ * Service names that don't match SERVICE_NAME_RE are skipped (not sanitised).
  */
 export function importCompose(composeYaml: string): ComposeImportResult {
   const warnings: string[] = [];
@@ -187,7 +182,13 @@ export function importCompose(composeYaml: string): ComposeImportResult {
       warnings.push(`service "${rawName}": empty definition skipped`);
       continue;
     }
-    const name = sanitizeName(rawName);
+    if (!SERVICE_NAME_RE.test(rawName)) {
+      warnings.push(
+        `service "${rawName}": name must match ${SERVICE_NAME_RE} — skipped (names are not sanitised)`,
+      );
+      continue;
+    }
+    const name = rawName;
     const image = rawSvc.image ?? "";
     const port = firstPort(rawSvc);
     const env = envFromCompose(rawSvc.environment);

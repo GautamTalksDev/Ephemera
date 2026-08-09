@@ -2,13 +2,14 @@ import {
   appendEvent,
   claimEnvironmentById,
   getEnvironmentById,
-  getRepoById,
+  getRepoByIdWithToken,
   listRecentEvents,
   updateEnvironmentState,
   type Environment,
 } from "@ephemera/api/db";
 import {
   PreviewSpecSchema,
+  githubHttpsCloneUrlFromFullName,
   parsePreviewSpec,
   probePublicUrl as defaultProbePublicUrl,
   redactGitSecrets,
@@ -20,6 +21,7 @@ import {
   PROVISION_DEADLINE_MS,
   PROVISION_EMPTY_GRACE_MS,
   READY_HEALTH_FAIL_MS,
+  resolvePreviewTtlMinutes,
   type ReconcileDeps,
 } from "./deps.js";
 import { renderStatusComment } from "./status-comment.js";
@@ -55,7 +57,11 @@ async function refreshAndComment(
   if (deps.postComments === false) {
     return env;
   }
-  const repo = await getRepoById(deps.db, env.repoId);
+  // Synthetic live-demo PR (#9001) has no GitHub issue — commenting 404s every tick.
+  if (env.isDemo) {
+    return env;
+  }
+  const repo = await getRepoByIdWithToken(deps.db, env.repoId);
   if (!repo) {
     return env;
   }
@@ -269,7 +275,7 @@ async function pendingToProvisioning(
   env: Environment,
   deps: ReconcileDeps,
 ): Promise<{ changed: boolean; to: string; step: string }> {
-  const repo = await getRepoById(deps.db, env.repoId);
+  const repo = await getRepoByIdWithToken(deps.db, env.repoId);
   if (!repo) {
     const { env: next } = await recordErrorAttempt(
       deps,
@@ -500,7 +506,7 @@ async function deployingStep(
     };
   }
 
-  const repo = await getRepoById(deps.db, env.repoId);
+  const repo = await getRepoByIdWithToken(deps.db, env.repoId);
   if (!repo) {
     const { env: next } = await recordErrorAttempt(
       deps,
@@ -530,9 +536,8 @@ async function deployingStep(
     };
   }
 
-  const repoUrl =
-    deps.githubRepoUrl?.(repo.fullName) ??
-    `https://github.com/${repo.fullName}.git`;
+  // Clone URL from validated owner/repo parts only — never a caller-supplied URL.
+  const repoUrl = githubHttpsCloneUrlFromFullName(repo.fullName);
 
   const deadlineMs = deps.deployDeadlineMs ?? DEPLOY_DEADLINE_MS;
   const elapsed = msInCurrentActualState(env);
@@ -552,19 +557,53 @@ async function deployingStep(
     });
 
     if (status.state === "ready") {
+      // Invariant: ready always carries a public URL for the dashboard/PR comment.
+      if (!status.publicUrl) {
+        await appendEvent(deps.db, {
+          environmentId: env.id,
+          level: "error",
+          step: "deploy",
+          message:
+            "getStatus returned ready without publicUrl; staying in deploying",
+        });
+        if (elapsed >= deadlineMs) {
+          const next = await markPollFailed(
+            deps,
+            env,
+            "deploy",
+            "deploy timed out: getStatus ready but publicUrl was never set",
+          );
+          return {
+            changed: true,
+            to: `${next.desiredState}/${next.actualState}`,
+            step: "deploy-timeout",
+          };
+        }
+        return {
+          changed: false,
+          to: `${env.desiredState}/${env.actualState}`,
+          step: "deploying-wait-url",
+        };
+      }
+
+      // Refresh TTL from the repo's current default (env var fallback) so
+      // PREVIEW_TTL_MINUTES / repo updates apply to newly-ready previews.
+      const ttlMinutes = resolvePreviewTtlMinutes(repo.defaultTtlMinutes);
+      const expiresAt = new Date(Date.now() + ttlMinutes * 60_000);
       const updated = await succeedStep(
         deps,
         env,
         {
           actualState: "ready",
-          publicUrl: status.publicUrl ?? null,
+          publicUrl: status.publicUrl,
           errorMessage: null,
           degraded: false,
           healthFailedSince: null,
           reconciledSha: env.headSha,
+          expiresAt,
         },
         "deploy",
-        `deploy ready${status.publicUrl ? `: ${status.publicUrl}` : ""}`,
+        `deploy ready: ${status.publicUrl} (TTL ${ttlMinutes}m → ${expiresAt.toISOString()})`,
       );
       return {
         changed: true,
@@ -663,6 +702,47 @@ async function readyStep(
       to: `${updated.desiredState}/${updated.actualState}`,
       step: "ready→desired-destroyed",
     };
+  }
+
+  // Services deleted outside Ephemera → DB still says ready. Detect and rebuild.
+  if (env.providerRef) {
+    try {
+      const status = await deps.provider.getStatus({
+        providerRef: env.providerRef,
+        phase: "deployed",
+      });
+      if (isNoServicesMessage(status.message)) {
+        const updated = await succeedStep(
+          deps,
+          env,
+          {
+            actualState: "pending",
+            providerRef: null,
+            publicUrl: null,
+            errorMessage: null,
+            degraded: false,
+            healthFailedSince: null,
+            reconciledSha: null,
+          },
+          "drift-detected",
+          `no services found for providerRef "${env.providerRef}"; resetting to pending to rebuild`,
+        );
+        return {
+          changed: true,
+          to: `${updated.desiredState}/${updated.actualState}`,
+          step: "ready→pending",
+        };
+      }
+    } catch (err) {
+      // Drift check is best-effort; fall through to URL health.
+      const message = err instanceof Error ? err.message : String(err);
+      await appendEvent(deps.db, {
+        environmentId: env.id,
+        level: "error",
+        step: "drift-check",
+        message: `getStatus during ready poll failed: ${message}`,
+      });
+    }
   }
 
   if (!env.publicUrl) {
