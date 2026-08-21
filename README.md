@@ -171,4 +171,4 @@ has expired, press Run live demo and a fresh one comes up in about 90 seconds.
 
 ## License
 
-Private / unpublished — course project.
+Apache License 2.0
