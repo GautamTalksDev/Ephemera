@@ -158,6 +158,17 @@ Content type: `application/json`. Secret: same as `GITHUB_WEBHOOK_SECRET`. Event
 
 No other AI coding assistants were used for this repository’s implementation work.
 
+## Try it
+
+This is a public demo instance. Viewing is open to anyone; the destroy, retry,
+extend TTL, and run demo buttons need an admin token, which for this instance is
+deliberately public:
+
+f2d58a1908f4d0e802a538e3cecf8b5f2c008a343fe7d73fe325454e2c33316f
+
+Paste it into the Admin token field on the dashboard. If the demo environment
+has expired, press Run live demo and a fresh one comes up in about 90 seconds.
+
 ## License
 
 Private / unpublished — course project.
